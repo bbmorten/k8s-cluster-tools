@@ -1,0 +1,38 @@
+---
+# HTTPS at the edge, plain HTTP from controller to pod.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: test-ingress-1
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - test-ingress-1.example.com
+      secretName: example-tls
+  rules:
+    - host: test-ingress-1.example.com
+      http:
+        paths:
+          - path: /a
+            pathType: Prefix
+            backend:
+              service:
+                name: web-a
+                port:
+                  number: 80
+          - path: /b
+            pathType: Prefix
+            backend:
+              service:
+                name: web-b
+                port:
+                  number: 80
+          - path: /c
+            pathType: Prefix
+            backend:
+              service:
+                name: web-c
+                port:
+                  number: 80

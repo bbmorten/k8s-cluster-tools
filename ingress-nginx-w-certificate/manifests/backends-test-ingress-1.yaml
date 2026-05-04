@@ -1,0 +1,153 @@
+---
+# HTTP-only backends for test-ingress-1.example.com.
+# Each pod returns identifying text via the nginx envsubst template feature.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-template
+  namespace: test-ingress-1
+data:
+  default.conf.template: |
+    server {
+      listen 80 default_server;
+      server_name _;
+      location / {
+        default_type text/plain;
+        return 200 "host=$host pod=${POD_NAME} ns=${POD_NAMESPACE} letter=${SERVICE_LABEL} path=$request_uri scheme=$scheme\n";
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-a
+  namespace: test-ingress-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web-a}
+  template:
+    metadata:
+      labels: {app: web-a}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: SERVICE_LABEL
+              value: "a"
+            - name: NGINX_ENVSUBST_FILTER
+              value: "POD_NAME|POD_NAMESPACE|SERVICE_LABEL"
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/templates
+      volumes:
+        - name: nginx-template
+          configMap: {name: nginx-template}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-a
+  namespace: test-ingress-1
+spec:
+  selector: {app: web-a}
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-b
+  namespace: test-ingress-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web-b}
+  template:
+    metadata:
+      labels: {app: web-b}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: SERVICE_LABEL
+              value: "b"
+            - name: NGINX_ENVSUBST_FILTER
+              value: "POD_NAME|POD_NAMESPACE|SERVICE_LABEL"
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/templates
+      volumes:
+        - name: nginx-template
+          configMap: {name: nginx-template}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-b
+  namespace: test-ingress-1
+spec:
+  selector: {app: web-b}
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-c
+  namespace: test-ingress-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web-c}
+  template:
+    metadata:
+      labels: {app: web-c}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: SERVICE_LABEL
+              value: "c"
+            - name: NGINX_ENVSUBST_FILTER
+              value: "POD_NAME|POD_NAMESPACE|SERVICE_LABEL"
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/templates
+      volumes:
+        - name: nginx-template
+          configMap: {name: nginx-template}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-c
+  namespace: test-ingress-1
+spec:
+  selector: {app: web-c}
+  ports:
+    - port: 80
+      targetPort: 80

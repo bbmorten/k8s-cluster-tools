@@ -1,0 +1,172 @@
+---
+# HTTPS-on-443 backends for test-ingress-2.example.com.
+# Pods serve TLS using the same self-signed Secret created by create-tls-secret.sh.
+# The ingress in front re-encrypts (backend-protocol: HTTPS); ingress-nginx does
+# not verify the upstream cert by default, which is what we want for self-signed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-template
+  namespace: test-ingress-2
+data:
+  default.conf.template: |
+    server {
+      listen 443 ssl default_server;
+      server_name _;
+      ssl_certificate     /etc/nginx/tls/tls.crt;
+      ssl_certificate_key /etc/nginx/tls/tls.key;
+      location / {
+        default_type text/plain;
+        return 200 "host=$host pod=${POD_NAME} ns=${POD_NAMESPACE} letter=${SERVICE_LABEL} path=$request_uri scheme=$scheme\n";
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-a
+  namespace: test-ingress-2
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web-a}
+  template:
+    metadata:
+      labels: {app: web-a}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 443
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: SERVICE_LABEL
+              value: "a"
+            - name: NGINX_ENVSUBST_FILTER
+              value: "POD_NAME|POD_NAMESPACE|SERVICE_LABEL"
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/templates
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+      volumes:
+        - name: nginx-template
+          configMap: {name: nginx-template}
+        - name: tls
+          secret: {secretName: example-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-a
+  namespace: test-ingress-2
+spec:
+  selector: {app: web-a}
+  ports:
+    - port: 443
+      targetPort: 443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-b
+  namespace: test-ingress-2
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web-b}
+  template:
+    metadata:
+      labels: {app: web-b}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 443
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: SERVICE_LABEL
+              value: "b"
+            - name: NGINX_ENVSUBST_FILTER
+              value: "POD_NAME|POD_NAMESPACE|SERVICE_LABEL"
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/templates
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+      volumes:
+        - name: nginx-template
+          configMap: {name: nginx-template}
+        - name: tls
+          secret: {secretName: example-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-b
+  namespace: test-ingress-2
+spec:
+  selector: {app: web-b}
+  ports:
+    - port: 443
+      targetPort: 443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-c
+  namespace: test-ingress-2
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web-c}
+  template:
+    metadata:
+      labels: {app: web-c}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 443
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: SERVICE_LABEL
+              value: "c"
+            - name: NGINX_ENVSUBST_FILTER
+              value: "POD_NAME|POD_NAMESPACE|SERVICE_LABEL"
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/templates
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+      volumes:
+        - name: nginx-template
+          configMap: {name: nginx-template}
+        - name: tls
+          secret: {secretName: example-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-c
+  namespace: test-ingress-2
+spec:
+  selector: {app: web-c}
+  ports:
+    - port: 443
+      targetPort: 443

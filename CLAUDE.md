@@ -12,6 +12,7 @@ Post-install add-ons live in sibling directories:
 
 - [metallb-installation/](metallb-installation/) — standalone shell scripts that install/tear down MetalLB against an already-built cluster via the merged kubeconfig from `fetch-kubeconfig.sh`. Not Ansible plays.
 - [registry-installation/](registry-installation/) — its own self-contained Ansible project (mirrors the `k8s-setup-w-cilium/` shape: `run.sh`, `ansible.cfg`, `inventory/`, `playbooks/`) that installs nerdctl + a Docker registry container on the control plane and wires every node's containerd to use it as an insecure mirror. Has its own `run.sh` and inventory copied from `k8s-setup-w-cilium/inventory/` — keep both in sync if you change IPs.
+- [ingress-nginx-w-certificate/](ingress-nginx-w-certificate/) — shell-script lab demo (no SSH to nodes, pure `kubectl apply`) that installs ingress-nginx behind a MetalLB IP and exposes two demo hostnames with different backend TLS modes. Mirrors `metallb-installation/` style.
 
 ## Where commands run
 
@@ -97,3 +98,19 @@ To bump the MetalLB version, edit the `v0.15.3` URL in **both** scripts (`setup-
 **Interactive `nerdctl` needs `sudo`.** As non-root, nerdctl tries to talk to a per-user rootless containerd at `/run/user/$UID/containerd-rootless` (which doesn't exist here). The system containerd's socket at `/run/containerd/containerd.sock` is root-only. The playbook itself works because every nerdctl task runs under `become: true`.
 
 **Teardown order matters.** [playbooks/teardown-registry.yaml](registry-installation/playbooks/teardown-registry.yaml) reverses install in this order to keep containerd healthy: (1) all nodes — reset `config_path` to `""`, remove the `certs.d/<cp-ip>:5000/` directory, restart containerd; (2) control plane — `nerdctl stop/rm/rmi registry:3.1.1`; (3) delete `/var/lib/registry` (destroys blob store); (4) delete `/usr/local/bin/nerdctl` unless `-e remove_nerdctl=false`. Each step gracefully no-ops on hosts where the install never ran.
+
+## Ingress-nginx demo (ingress-nginx-w-certificate/)
+
+[ingress-nginx-w-certificate/](ingress-nginx-w-certificate/) is a self-contained lab that exposes two hostnames behind a MetalLB-assigned LoadBalancer IP, with **different** backend TLS modes per host: `test-ingress-1.example.com/{a,b,c}` terminates TLS at the ingress and talks plain HTTP to pods in `test-ingress-1`; `test-ingress-2.example.com/{a,b,c}` re-encrypts and talks HTTPS to pods in `test-ingress-2`. Each path (`/a`, `/b`, `/c`) routes to a distinct backend Deployment (`web-a`, `web-b`, `web-c`); the response identifies the pod via Downward-API env vars rendered into the nginx config.
+
+**Versions.** Controller pinned to `controller-v1.15.1` — **the final release**. The upstream `kubernetes/ingress-nginx` repo was archived **2026-03-24**. Bump via `INGRESS_NGINX_VERSION=...` env var (set in both [setup-ingress-demo.sh](ingress-nginx-w-certificate/setup-ingress-demo.sh) and [teardown-ingress-demo.sh](ingress-nginx-w-certificate/teardown-ingress-demo.sh)). Successors to consider: Ingate, or Cilium's own Gateway API implementation.
+
+**Re-encrypt, not passthrough.** test-ingress-2 uses `nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"` (controller decrypts, inspects path, re-encrypts to upstream). Full SSL passthrough was rejected because it routes only by SNI — the controller never sees the path, so `/a /b /c` fan-out wouldn't work. Upstream cert verification is left at the default (off) because the pod cert is self-signed by the same script that issues the edge cert.
+
+**One SAN cert, two namespaces.** [create-tls-secret.sh](ingress-nginx-w-certificate/create-tls-secret.sh) generates a single cert with `subjectAltName = DNS:test-ingress-1.example.com, DNS:test-ingress-2.example.com` and applies the same `example-tls` Secret in both namespaces (used both by the Ingress `tls:` blocks and mounted into test-ingress-2 pods that serve TLS themselves). The script is re-runnable via `kubectl create secret … --dry-run=client -o yaml | kubectl apply`.
+
+**LB IP pinning + the conflict gotcha.** Setup pins the controller Service to `192.168.48.201` via the `metallb.universe.tf/loadBalancerIPs` annotation so external `/etc/hosts` entries survive teardown/reinstall. **MetalLB will not double-allocate** — if `metallb-installation/setup-metallb.sh`'s leftover `test-service` (in `default`) is still holding `.201`, the controller Service will sit without an EXTERNAL-IP and setup prints `WARNING: controller Service has no LB IP yet`. Fix: `kubectl delete svc test-service -n default` (the stub serves no purpose), or override `LB_IP=192.168.48.202`.
+
+**Pod identification via `NGINX_ENVSUBST_FILTER`.** The nginx image's templating runs `envsubst` over `/etc/nginx/templates/*.template`; without a filter it would clobber nginx variables like `$host`, `$request_uri`, `$scheme` (substituting them to empty). Backends set `NGINX_ENVSUBST_FILTER="POD_NAME|POD_NAMESPACE|SERVICE_LABEL"` so only those three Downward-API/static env vars get expanded; nginx's own `$vars` pass through verbatim and are evaluated at request time.
+
+**Teardown order.** [teardown-ingress-demo.sh](ingress-nginx-w-certificate/teardown-ingress-demo.sh) deletes ingresses → backends → TLS Secrets → demo namespaces → controller manifest, in that order so the controller stops routing into namespaces before they disappear.
