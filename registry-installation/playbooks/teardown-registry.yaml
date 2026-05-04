@@ -1,0 +1,92 @@
+---
+# Reverse install-registry.yaml in the same order it was applied:
+#   1. Reset containerd config_path back to "" and remove certs.d entry on every node.
+#   2. Stop & remove the registry container, image, and data dir on the control plane.
+#   3. Optionally remove the nerdctl binary (gated by `remove_nerdctl`, default true).
+#
+# Pass `-e remove_nerdctl=false` to keep nerdctl installed (e.g. for future reinstall).
+- name: Remove insecure registry config from all nodes
+  hosts: k8s_cluster
+  become: true
+  vars:
+    registry_host: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
+    registry_port: 5000
+    registry_endpoint: "{{ registry_host }}:{{ registry_port }}"
+    certs_d_dir: "/etc/containerd/certs.d"
+  handlers:
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: yes
+  tasks:
+    - name: Check containerd config exists
+      stat:
+        path: /etc/containerd/config.toml
+      register: containerd_config
+
+    - name: Reset registry config_path to empty
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^(\s*)config_path\s*=\s*"{{ certs_d_dir | regex_escape }}"'
+        replace: '\1config_path = ""'
+      when: containerd_config.stat.exists
+      notify: restart containerd
+
+    - name: Remove registry hosts.toml directory
+      file:
+        path: "{{ certs_d_dir }}/{{ registry_endpoint }}"
+        state: absent
+      notify: restart containerd
+
+- name: Remove registry container, image, and nerdctl on control plane
+  hosts: control_plane
+  become: true
+  vars:
+    registry_data_dir: "/var/lib/registry"
+    remove_nerdctl: true
+  tasks:
+    - name: Detect nerdctl
+      command: which nerdctl
+      register: nerdctl_path
+      failed_when: false
+      changed_when: false
+
+    - name: Stop registry container
+      command: nerdctl stop registry
+      register: stop_result
+      failed_when: false
+      changed_when: stop_result.rc == 0
+      when: nerdctl_path.rc == 0
+
+    - name: Remove registry container
+      command: nerdctl rm registry
+      register: rm_result
+      failed_when: false
+      changed_when: rm_result.rc == 0
+      when: nerdctl_path.rc == 0
+
+    - name: Remove registry image
+      command: nerdctl rmi registry:3.1.1
+      register: rmi_result
+      failed_when: false
+      changed_when: rmi_result.rc == 0
+      when: nerdctl_path.rc == 0
+
+    - name: Remove registry data directory
+      file:
+        path: "{{ registry_data_dir }}"
+        state: absent
+
+    - name: Remove nerdctl binary
+      file:
+        path: /usr/local/bin/nerdctl
+        state: absent
+      when: remove_nerdctl | bool
+
+    - name: Confirm cleanup
+      debug:
+        msg:
+          - "Registry container removed."
+          - "nerdctl removed: {{ remove_nerdctl | bool }}"
+          - "Registry data dir {{ registry_data_dir }} removed."

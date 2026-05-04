@@ -1,0 +1,166 @@
+---
+# Install nerdctl on the control plane, run a local Docker registry as a host-network
+# container, and configure containerd on every node to pull from it as an insecure mirror.
+#
+# Versions are pinned inline; bump in the vars: blocks below.
+- name: Install nerdctl and run registry container on control plane
+  hosts: control_plane
+  become: true
+  vars:
+    nerdctl_version: "2.2.2"
+    registry_image: "registry:3.1.1"
+    registry_data_dir: "/var/lib/registry"
+  tasks:
+    - name: Check installed nerdctl version
+      command: nerdctl --version
+      register: nerdctl_check
+      failed_when: false
+      changed_when: false
+
+    - name: Decide whether nerdctl needs install/upgrade
+      set_fact:
+        nerdctl_needs_install: "{{ nerdctl_check.rc != 0 or nerdctl_version not in (nerdctl_check.stdout | default('')) }}"
+
+    - name: Download nerdctl tarball
+      get_url:
+        url: "https://github.com/containerd/nerdctl/releases/download/v{{ nerdctl_version }}/nerdctl-{{ nerdctl_version }}-linux-amd64.tar.gz"
+        dest: "/tmp/nerdctl-{{ nerdctl_version }}.tar.gz"
+        mode: '0644'
+      when: nerdctl_needs_install
+
+    - name: Install nerdctl binary into /usr/local/bin
+      unarchive:
+        src: "/tmp/nerdctl-{{ nerdctl_version }}.tar.gz"
+        dest: /usr/local/bin
+        remote_src: yes
+        include:
+          - nerdctl
+        mode: '0755'
+        owner: root
+        group: root
+      when: nerdctl_needs_install
+
+    - name: Confirm nerdctl is callable
+      command: nerdctl --version
+      register: nerdctl_verify
+      changed_when: false
+
+    - name: Show nerdctl version
+      debug:
+        var: nerdctl_verify.stdout
+
+    - name: Ensure registry data directory exists
+      file:
+        path: "{{ registry_data_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Pull registry image
+      command: "nerdctl pull {{ registry_image }}"
+      register: registry_pull
+      changed_when: "'downloading' in (registry_pull.stderr | default('') | lower) or 'pulling' in (registry_pull.stderr | default('') | lower)"
+
+    - name: Inspect registry container status (if any)
+      command: nerdctl ps -a --filter name=^registry$ --format '{% raw %}{{.Status}}{% endraw %}'
+      register: registry_state
+      changed_when: false
+
+    - name: Start registry container (host network, restart=always)
+      command: >-
+        nerdctl run -d
+        --name registry
+        --restart=always
+        --net=host
+        -v {{ registry_data_dir }}:/var/lib/registry
+        {{ registry_image }}
+      when: registry_state.stdout | trim == ""
+
+    - name: Start registry container if it exists but is stopped
+      command: nerdctl start registry
+      when:
+        - registry_state.stdout | trim != ""
+        - not (registry_state.stdout | trim).startswith("Up")
+
+    - name: Wait for registry to answer on :5000
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:5000/v2/"
+        status_code: 200
+      register: reg_local_probe
+      retries: 10
+      delay: 2
+      until: reg_local_probe.status == 200
+
+# ----------------------------------------------------------------------------
+# Configure containerd on every node to trust the registry as an insecure mirror
+# using the certs.d/<host:port>/hosts.toml directory layout (containerd >=1.5).
+# We only touch config.toml to flip `config_path` from "" to /etc/containerd/certs.d
+# so the rest of the file (notably SystemdCgroup = true) stays intact.
+# ----------------------------------------------------------------------------
+- name: Configure containerd insecure registry on all nodes
+  hosts: k8s_cluster
+  become: true
+  vars:
+    registry_host: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
+    registry_port: 5000
+    registry_endpoint: "{{ registry_host }}:{{ registry_port }}"
+    certs_d_dir: "/etc/containerd/certs.d"
+  handlers:
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: yes
+  tasks:
+    - name: Verify containerd config exists
+      stat:
+        path: /etc/containerd/config.toml
+      register: containerd_config
+
+    - name: Fail if containerd config is missing
+      fail:
+        msg: "/etc/containerd/config.toml not found. Run k8s-setup-w-cilium/playbooks/install-cluster.yaml first."
+      when: not containerd_config.stat.exists
+
+    - name: Ensure certs.d host directory tree exists
+      file:
+        path: "{{ certs_d_dir }}/{{ registry_endpoint }}"
+        state: directory
+        mode: '0755'
+
+    - name: Write registry hosts.toml
+      copy:
+        dest: "{{ certs_d_dir }}/{{ registry_endpoint }}/hosts.toml"
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          server = "http://{{ registry_endpoint }}"
+
+          [host."http://{{ registry_endpoint }}"]
+            capabilities = ["pull", "resolve", "push"]
+            skip_verify = true
+      notify: restart containerd
+
+    - name: Point containerd registry config_path at certs.d
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^(\s*)config_path\s*=\s*"[^"]*"'
+        replace: '\1config_path = "{{ certs_d_dir }}"'
+      notify: restart containerd
+
+    - name: Flush handlers so containerd reloads before we probe
+      meta: flush_handlers
+
+    - name: Probe registry from this node
+      ansible.builtin.uri:
+        url: "http://{{ registry_endpoint }}/v2/"
+        status_code: 200
+      register: reg_probe
+      retries: 5
+      delay: 3
+      until: reg_probe.status == 200
+      ignore_errors: true
+
+    - name: Report registry reachability
+      debug:
+        msg: "Registry {{ registry_endpoint }} reachable from {{ inventory_hostname }}: {{ 'OK' if (reg_probe.status | default(0)) == 200 else 'FAIL' }}"

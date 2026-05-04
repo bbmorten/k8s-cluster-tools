@@ -8,7 +8,10 @@ This repo contains Ansible-driven tooling to stand up a 4-node Kubernetes cluste
 
 The active project lives in [k8s-setup-w-cilium/](k8s-setup-w-cilium/). The README references a sibling [../k8s-setup-w-calico/](../k8s-setup-w-calico/) Calico variant; that directory is not in this checkout.
 
-Post-install add-ons live as standalone shell scripts in sibling directories: [metallb-installation/](metallb-installation/) installs and tears down MetalLB. These run against an already-built cluster via the merged kubeconfig from `fetch-kubeconfig.sh` — they are not Ansible plays and are not invoked by `run.sh`.
+Post-install add-ons live in sibling directories:
+
+- [metallb-installation/](metallb-installation/) — standalone shell scripts that install/tear down MetalLB against an already-built cluster via the merged kubeconfig from `fetch-kubeconfig.sh`. Not Ansible plays.
+- [registry-installation/](registry-installation/) — its own self-contained Ansible project (mirrors the `k8s-setup-w-cilium/` shape: `run.sh`, `ansible.cfg`, `inventory/`, `playbooks/`) that installs nerdctl + a Docker registry container on the control plane and wires every node's containerd to use it as an insecure mirror. Has its own `run.sh` and inventory copied from `k8s-setup-w-cilium/inventory/` — keep both in sync if you change IPs.
 
 ## Where commands run
 
@@ -80,3 +83,17 @@ Cilium's install does **not** provide LoadBalancer IP allocation, so Services of
 [metallb-installation/teardown-metallb.sh](metallb-installation/teardown-metallb.sh) reverses the install in order (test-service → L2Advertisement → IPAddressPool → manifest delete), then `kubectl wait --for=delete namespace/metallb-system` and verifies no `metallb.io` CRDs remain. Both scripts use the caller's current kubeconfig context — point at the cluster via `fetch-kubeconfig.sh` first.
 
 To bump the MetalLB version, edit the `v0.15.3` URL in **both** scripts (`setup-metallb.sh` line 7 and `teardown-metallb.sh`'s `METALLB_MANIFEST` variable) so teardown deletes what setup applied.
+
+## In-cluster registry (registry-installation/)
+
+[registry-installation/](registry-installation/) is its own Ansible project — `cd registry-installation && bash run.sh playbooks/install-registry.yaml`. Versions pinned inline in [playbooks/install-registry.yaml](registry-installation/playbooks/install-registry.yaml): nerdctl `2.2.2`, registry image `registry:3.1.1`. To bump versions, edit the `nerdctl_version` / `registry_image` vars in install **and** the matching `registry:3.1.1` line in [playbooks/teardown-registry.yaml](registry-installation/playbooks/teardown-registry.yaml) so teardown removes what install applied.
+
+**Two plays.** Play 1 (control plane only) downloads the nerdctl tarball, extracts only the `nerdctl` binary into `/usr/local/bin/`, pulls `registry:3.1.1`, then runs the registry as `nerdctl run -d --name registry --restart=always --net=host -v /var/lib/registry:/var/lib/registry registry:3.1.1`. Play 2 (every node) writes `/etc/containerd/certs.d/<cp-ip>:5000/hosts.toml` with `skip_verify = true`, then **flips a single line** in `/etc/containerd/config.toml`: `config_path = ""` → `config_path = "/etc/containerd/certs.d"`. It does **not** regenerate `config.toml` from `containerd config default` — that would wipe the `SystemdCgroup = true` line set by `install-cluster.yaml` and cause kubelet/containerd cgroup-driver mismatches.
+
+**Why `--net=host`.** nerdctl's default bridge mode drops `nerdctl-bridge.conflist` into `/etc/cni/net.d/`, which on a Cilium node sits next to `05-cilium.conflist` and can break pod networking. Host networking sidesteps the CNI machinery — the registry just listens on `:5000` directly on the control plane.
+
+**Public registries keep working.** The `certs.d/<host:port>/` layout is per-host: containerd only consults it when pulling from that exact `host:port`. `docker.io`, `registry.k8s.io`, etc. continue to use normal HTTPS. Don't create a `_default/hosts.toml` or a `registry.mirrors."docker.io"` block unless you actually want to intercept those.
+
+**Interactive `nerdctl` needs `sudo`.** As non-root, nerdctl tries to talk to a per-user rootless containerd at `/run/user/$UID/containerd-rootless` (which doesn't exist here). The system containerd's socket at `/run/containerd/containerd.sock` is root-only. The playbook itself works because every nerdctl task runs under `become: true`.
+
+**Teardown order matters.** [playbooks/teardown-registry.yaml](registry-installation/playbooks/teardown-registry.yaml) reverses install in this order to keep containerd healthy: (1) all nodes — reset `config_path` to `""`, remove the `certs.d/<cp-ip>:5000/` directory, restart containerd; (2) control plane — `nerdctl stop/rm/rmi registry:3.1.1`; (3) delete `/var/lib/registry` (destroys blob store); (4) delete `/usr/local/bin/nerdctl` unless `-e remove_nerdctl=false`. Each step gracefully no-ops on hosts where the install never ran.
