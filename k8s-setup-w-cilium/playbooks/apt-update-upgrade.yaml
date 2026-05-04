@@ -1,61 +1,72 @@
 ---
 # Simple playbook to update and upgrade all hosts
 # Run with: ansible-playbook -i inventory/nodes.ini apt-update-upgrade.yaml
-# 
+#
 # To automatically reboot if needed, add: -e "perform_reboot=yes"
 # Example: ansible-playbook -i inventory/nodes.ini apt-update-upgrade.yaml -e "perform_reboot=yes"
 
-- name: Update and upgrade all hosts
-  hosts: all
+- name: Update and upgrade all cluster hosts
+  hosts: k8s_cluster
   become: true
   gather_facts: true
-  
+  any_errors_fatal: true
+
   tasks:
-    - name: Normalize Ubuntu apt sources to archive.ubuntu.com/ubuntu
-      ansible.builtin.replace:
-        path: /etc/apt/sources.list.d/ubuntu.sources
-        regexp: '{{ item.from }}'
-        replace: '{{ item.to }}'
-      loop:
-        - { from: 'http://[a-z]{2}\.archive\.ubuntu\.com/ubuntu/?', to: 'http://archive.ubuntu.com/ubuntu/' }
-        - { from: 'http://security\.ubuntu\.com/ubuntu/?', to: 'http://archive.ubuntu.com/ubuntu/' }
+    - name: Check for apt locks
+      shell: |
+        lsof /var/lib/dpkg/lock-frontend || echo "No locks found"
+        lsof /var/lib/apt/lists/lock || echo "No locks found"
+        lsof /var/cache/apt/archives/lock || echo "No locks found"
+        lsof /var/lib/dpkg/lock || echo "No locks found"
+      register: apt_locks
+      changed_when: false
+      ignore_errors: true
+
+    - name: Wait for apt locks to be released
+      shell: |
+        while lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || lsof /var/cache/apt/archives/lock >/dev/null 2>&1 || lsof /var/lib/dpkg/lock >/dev/null 2>&1; do
+          echo "Waiting for apt locks to be released..."
+          sleep 10
+        done
+      when: apt_locks.rc == 0
+      changed_when: false
 
     - name: Update apt cache
+      # No cache_valid_time: this playbook is the "patch the nodes" tool, so
+      # always refresh indices even if another step touched the cache minutes ago.
       apt:
         update_cache: yes
-        cache_valid_time: 3600
-        lock_timeout: 300
-
-    - name: Hold trivy (upstream repo index references deleted .deb files)
-      ansible.builtin.dpkg_selections:
-        name: trivy
-        selection: hold
-      failed_when: false
+      register: apt_update_result
+      retries: 5
+      delay: 30
+      until: apt_update_result is success
 
     - name: Upgrade all packages
       apt:
-        upgrade: yes
-        update_cache: no
-        cache_valid_time: 3600
+        upgrade: full
         autoremove: yes
-        lock_timeout: 300
-      register: upgrade_result
-      
-    - name: Show upgrade results
+        autoclean: yes
+        force_apt_get: yes
+      register: apt_upgrade_result
+      retries: 5
+      delay: 30
+      until: apt_upgrade_result is success
+
+    - name: Show package upgrade summary
       debug:
-        msg: "{{ upgrade_result.stdout_lines | default(['No changes made']) }}"
-      when: upgrade_result.stdout_lines is defined
-      
-    - name: Show if system requires a reboot
+        msg: "{{ apt_upgrade_result.stdout_lines | default(['No upgrades performed']) }}"
+      when: apt_upgrade_result.stdout_lines is defined
+
+    - name: Check if system requires a reboot
       stat:
         path: /var/run/reboot-required
       register: reboot_required
-      
+
     - name: Notify if reboot is required
       debug:
         msg: "System requires a reboot"
       when: reboot_required.stat.exists
-      
+
     - name: Reboot the system if required
       # Non-interactive: pass -e perform_reboot=yes to actually reboot.
       # Without that flag, /var/run/reboot-required is reported but no reboot occurs.
