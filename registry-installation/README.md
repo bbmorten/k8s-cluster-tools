@@ -135,6 +135,9 @@ ssh vm@${CP_IP} '
 
 # Pull through containerd (on any node) using crictl
 ssh vm@<any-node> "sudo crictl pull ${CP_IP}:5000/alpine:3.20"
+
+# End-to-end: kubelet pulls and runs from the local registry
+kubectl run alpine-test -it --rm --image=${CP_IP}:5000/alpine:3.20 -- /bin/sh
 ```
 
 If `crictl pull` fails with `http: server gave HTTP response to HTTPS client`, the `hosts.toml` didn't take effect — re-run the install playbook (or check that `config_path` in `/etc/containerd/config.toml` actually changed and containerd was restarted).
