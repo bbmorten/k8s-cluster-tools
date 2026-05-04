@@ -216,11 +216,27 @@
       changed_when: false
     
     # Install containerd
+    - name: Check if 'universe' is already enabled in deb822 ubuntu.sources
+      shell: |
+        grep -E '^Components:.*\buniverse\b' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+      register: universe_in_ubuntu_sources
+      changed_when: false
+
+    - name: Remove duplicate universe-only list left by prior runs
+      # apt_repository writes a one-line .list and can't see 'universe' inside the
+      # deb822 ubuntu.sources, so without this it appends a duplicate on every run,
+      # producing "Target ... is configured multiple times" warnings on apt update.
+      file:
+        path: /etc/apt/sources.list.d/archive_ubuntu_com_ubuntu.list
+        state: absent
+      when: universe_in_ubuntu_sources.stdout != ""
+
     - name: Ensure universe repository is enabled
       apt_repository:
         repo: "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
         state: present
         update_cache: yes
+      when: universe_in_ubuntu_sources.stdout == ""
 
     - name: Install containerd
       apt:
