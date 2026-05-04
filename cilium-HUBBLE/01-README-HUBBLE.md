@@ -22,12 +22,14 @@ sudo tar xzvfC cilium-linux-amd64.tar.gz /usr/local/bin
 HUBBLE_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/hubble/master/stable.txt)
 curl -L --fail --remote-name-all https://github.com/cilium/hubble/releases/download/${HUBBLE_VERSION}/hubble-linux-amd64.tar.gz
 sudo tar xzvfC hubble-linux-amd64.tar.gz /usr/local/bin
+
+cilium upgrade
 ```
 
 ## 2. Point at the cluster
 
 ```
-export KUBECONFIG=~/.kube/config
+# export KUBECONFIG=~/.kube/config
 kubectl config use-context cilium-lab
 cilium status --wait
 ```
