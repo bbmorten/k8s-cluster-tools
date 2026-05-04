@@ -1,0 +1,11 @@
+# Intentionally invalid: replicas above Maximum=10, html below MinLength=1.
+# `kubectl apply -f bad-site.yaml` should be rejected by the apiserver before
+# the controller ever sees it — proof that OpenAPI schema validation is
+# enforced at admission, not by your reconcile code.
+apiVersion: web.example.com/v1
+kind: Website
+metadata:
+  name: bad-site
+spec:
+  replicas: 99
+  html: ""
