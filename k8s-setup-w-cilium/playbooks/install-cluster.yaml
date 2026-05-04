@@ -1,0 +1,782 @@
+---
+# Consolidated Kubernetes Cluster Installation Playbook
+# Compatible with Ubuntu 24.04 and Kubernetes 1.32
+# This playbook combines all the individual installation steps into a single workflow
+
+- name: Update /etc/hosts on all virtual machines
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  
+  pre_tasks:
+    - name: Create dynamic hosts entries from inventory
+      set_fact:
+        hosts_entries: "{{ hosts_entries | default([]) + [{'ip': hostvars[item]['ansible_host'], 'hostname': item}] }}"
+      loop: "{{ groups['k8s_cluster'] }}"
+      run_once: true
+      delegate_to: localhost
+  
+  tasks:
+#    - name: Disable cloud-init manage_etc_hosts
+#      lineinfile:
+#        path: /etc/cloud/cloud.cfg
+#        regexp: '^manage_etc_hosts:'
+#        line: 'manage_etc_hosts: false'
+#        state: present
+      
+    - name: Backup original /etc/hosts file
+      copy:
+        src: /etc/hosts
+        dest: /etc/hosts.bak
+        remote_src: yes
+      
+    - name: Ensure base /etc/hosts entries exist
+      blockinfile:
+        path: /etc/hosts
+        create: yes
+        block: |
+          127.0.1.1 {{ ansible_hostname }} {{ ansible_hostname }}
+          127.0.0.1 localhost
+          
+          # The following lines are desirable for IPv6 capable hosts
+          ::1 localhost ip6-localhost ip6-loopback
+          ff02::1 ip6-allnodes
+          ff02::2 ip6-allrouters
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - BASE HOSTS"
+    
+    - name: Add all cluster hosts to /etc/hosts file
+      blockinfile:
+        path: /etc/hosts
+        block: |
+          {% for host in hostvars['localhost']['hosts_entries'] | default(hosts_entries) %}
+          {{ host.ip }} {{ host.hostname }}
+          {% endfor %}
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - CLUSTER HOSTS"
+    
+    - name: Test hostname resolution
+      command: ping -c 1 {{ item.hostname }}
+      register: ping_result
+      failed_when: ping_result.rc != 0
+      loop: "{{ hostvars['localhost']['hosts_entries'] | default(hosts_entries) }}"
+      ignore_errors: yes
+    
+    - name: Show ping results
+      debug:
+        msg: "Ping test for {{ item.item.hostname }}: {{ 'Success' if item.rc == 0 else 'Failed' }}"
+      loop: "{{ ping_result.results }}"
+
+- name: System preparation - Update packages and disable swap
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  
+  tasks:
+    # Update package repositories and upgrade packages
+    - name: Check for apt locks
+      shell: |
+        lsof /var/lib/dpkg/lock-frontend || echo "No locks found"
+        lsof /var/lib/apt/lists/lock || echo "No locks found"
+        lsof /var/cache/apt/archives/lock || echo "No locks found"
+        lsof /var/lib/dpkg/lock || echo "No locks found"
+      register: apt_locks
+      changed_when: false
+      ignore_errors: true
+      
+    - name: Wait for apt locks to be released
+      shell: |
+        while lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || lsof /var/cache/apt/archives/lock >/dev/null 2>&1 || lsof /var/lib/dpkg/lock >/dev/null 2>&1; do
+          echo "Waiting for apt locks to be released..."
+          sleep 10
+        done
+      when: apt_locks.rc == 0
+      changed_when: false
+      
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      register: apt_update_result
+      retries: 5
+      delay: 30
+      until: apt_update_result is success
+      
+    - name: Upgrade all packages
+      apt:
+        upgrade: full
+        autoremove: yes
+        autoclean: yes
+        force_apt_get: yes
+      register: apt_upgrade_result
+      retries: 5
+      delay: 30
+      until: apt_upgrade_result is success
+        
+    - name: Show package upgrade summary
+      debug:
+        msg: "{{ apt_upgrade_result.stdout_lines | default(['No upgrades performed']) }}"
+      when: apt_upgrade_result.stdout_lines is defined
+    
+    # Disable swap permanently
+    - name: Check if swap is enabled
+      command: swapon --show
+      register: swap_status
+      changed_when: false
+
+    - name: Disable swap immediately
+      command: swapoff -a
+      when: swap_status.stdout != ""
+      
+    - name: Remove swap entries from /etc/fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s+sw\s+.*)$'
+        replace: '# \1'
+        backup: yes
+      register: fstab_change
+      
+    - name: Check if systemd-swap service exists
+      command: systemctl list-unit-files systemd-swap.service
+      register: systemd_swap_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Disable systemd-swap if it exists
+      systemd:
+        name: systemd-swap
+        enabled: no
+        state: stopped
+      when: systemd_swap_check.rc == 0 and 'systemd-swap.service' in systemd_swap_check.stdout
+
+    - name: Configure swappiness to zero
+      sysctl:
+        name: vm.swappiness
+        value: '0'
+        state: present
+        reload: yes
+      
+    - name: Verify swap is disabled
+      command: swapon --show
+      register: verify_swap
+      changed_when: false
+      
+    - name: Show swap status
+      debug:
+        msg: "Swap status: {{ 'Disabled' if verify_swap.stdout == '' else 'Still enabled!' }}"
+
+- name: Install Kubernetes 1.32 on Ubuntu 24.04
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  
+  tasks:
+    # Install required packages
+    - name: Install prerequisite packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+    
+    # Configure required kernel modules
+    - name: Load overlay module
+      modprobe:
+        name: overlay
+        state: present
+    
+    - name: Load br_netfilter module
+      modprobe:
+        name: br_netfilter
+        state: present
+    
+    # Ensure modules load at boot
+    - name: Ensure modules load at boot
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: '0644'
+    
+    # Configure kernel parameters
+    - name: Set sysctl params for Kubernetes
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward = 1
+        owner: root
+        group: root
+        mode: '0644'
+    
+    - name: Apply sysctl parameters without reboot
+      command: sysctl --system
+      changed_when: false
+    
+    # Install containerd
+    - name: Ensure universe repository is enabled
+      apt_repository:
+        repo: "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
+        state: present
+        update_cache: yes
+
+    - name: Install containerd
+      apt:
+        name: containerd
+        state: present
+    
+    - name: Create containerd configuration directory
+      file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+    
+    - name: Generate default containerd config
+      shell: |
+        containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+    
+    - name: Configure containerd to use SystemdCgroup
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+    
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+    
+    # Install Kubernetes 1.32
+    - name: Create keyring directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+    
+    - name: Add Kubernetes signing key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key | gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        executable: /bin/bash
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    
+    - name: Add Kubernetes 1.32 repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /'
+        mode: '0644'
+    
+    - name: Update apt cache after adding Kubernetes repository
+      apt:
+        update_cache: yes
+    
+    - name: Wait for apt locks to be released (pre-k8s install)
+      shell: |
+        while lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || lsof /var/lib/apt/lists/lock >/dev/null 2>&1 || lsof /var/cache/apt/archives/lock >/dev/null 2>&1 || lsof /var/lib/dpkg/lock >/dev/null 2>&1; do
+          echo "Waiting for apt locks to be released..."
+          sleep 10
+        done
+      changed_when: false
+    
+    - name: Install Kubernetes components
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        force_apt_get: yes
+      register: k8s_installation
+      retries: 5
+      delay: 30
+      until: k8s_installation is success
+    
+    - name: Hold Kubernetes packages at their current version
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+      when: k8s_installation.changed
+    
+    # Verify installation
+    - name: Verify kubectl version
+      command: kubectl version --client
+      register: kubectl_version
+      changed_when: false
+    
+    - name: Display kubectl version
+      debug:
+        var: kubectl_version.stdout_lines
+
+- name: Install crictl - CRI command line tool
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  
+  vars:
+    crictl_version: "v1.32.0"  # Default version as fallback
+  
+  tasks:
+    - name: Get latest crictl version using shell
+      ansible.builtin.shell: |
+        curl -s https://api.github.com/repos/kubernetes-sigs/cri-tools/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
+      delegate_to: localhost
+      run_once: true
+      become: false
+      register: crictl_version_result
+      changed_when: false
+      
+    - name: Set version fact from API result
+      set_fact:
+        crictl_version: "{{ crictl_version_result.stdout }}"
+      when: crictl_version_result.stdout is defined and crictl_version_result.stdout != ""
+      
+    - name: Display version to be installed
+      debug:
+        msg: "Installing crictl {{ crictl_version }}"
+        
+    - name: Check if crictl is already installed
+      command: which crictl
+      register: crictl_check
+      ignore_errors: true
+      changed_when: false
+      
+    - name: Check installed crictl version
+      command: crictl --version
+      register: crictl_current_version
+      ignore_errors: true
+      changed_when: false
+      when: crictl_check.rc == 0
+      
+    - name: Download crictl
+      get_url:
+        url: "https://github.com/kubernetes-sigs/cri-tools/releases/download/{{ crictl_version }}/crictl-{{ crictl_version }}-linux-amd64.tar.gz"
+        dest: /tmp/crictl.tar.gz
+        mode: '0644'
+      when: crictl_check.rc != 0 or (crictl_check.rc == 0 and crictl_current_version is defined and crictl_version not in crictl_current_version.stdout)
+      
+    - name: Extract crictl
+      unarchive:
+        src: /tmp/crictl.tar.gz
+        dest: /usr/local/bin/
+        remote_src: yes
+      when: crictl_check.rc != 0 or (crictl_check.rc == 0 and crictl_current_version is defined and crictl_version not in crictl_current_version.stdout)
+      
+    - name: Set crictl configuration
+      copy:
+        dest: /etc/crictl.yaml
+        content: |
+          runtime-endpoint: unix:///run/containerd/containerd.sock
+          image-endpoint: unix:///run/containerd/containerd.sock
+          timeout: 10
+          debug: false
+        mode: '0644'
+      register: crictl_config
+      
+    - name: Check if config file was created
+      stat:
+        path: /etc/crictl.yaml
+      register: config_file
+      
+    - name: Display config file status
+      debug:
+        msg: "Config file exists: {{ config_file.stat.exists }}"
+        
+    - name: Ensure crictl config file is properly set with correct path
+      lineinfile:
+        path: /etc/environment
+        line: 'CONTAINER_RUNTIME_ENDPOINT=unix:///run/containerd/containerd.sock'
+        regexp: '^CONTAINER_RUNTIME_ENDPOINT='
+        state: present
+      when: config_file.stat.exists
+      
+    - name: Verify crictl installation
+      command: crictl --version
+      register: crictl_version_output
+      changed_when: false
+      ignore_errors: true
+      
+    - name: Display crictl version
+      debug:
+        var: crictl_version_output.stdout
+      when: crictl_version_output is succeeded
+        
+    - name: Cleanup temporary files
+      file:
+        path: /tmp/crictl.tar.gz
+        state: absent
+      changed_when: false
+
+- name: Create Kubernetes configuration templates
+  hosts: control_plane
+  gather_facts: true
+  vars:
+    pod_network_cidr: "10.244.0.0/16"  # Pod CIDR used by Cilium
+    service_cidr: "10.96.0.0/12"       # Kubernetes default
+    kubernetes_version: "1.32.2"       # Can be adjusted as needed
+    control_plane_endpoint: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
+    apiserver_cert_extra_sans: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
+  tasks:
+    - name: Skip this play
+      debug:
+        msg: "Skipping template creation - using direct configuration instead"
+
+- name: Initialize Kubernetes cluster on control plane node
+  hosts: control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  
+  vars:
+    pod_network_cidr: "10.244.0.0/16"  # Pod CIDR used by Cilium
+    service_cidr: "10.96.0.0/12"       # Kubernetes default
+    kubernetes_version: "1.32.2"       # Can be adjusted as needed
+    control_plane_endpoint: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
+    apiserver_cert_extra_sans: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
+    cilium_version: "1.16.5"           # Cilium chart/release to install
+    cilium_cli_version: "v0.16.24"     # cilium CLI release
+
+
+  tasks:
+    # Prerequisite checks before cluster initialization
+    - name: Check if Kubernetes is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: k8s_initialized
+      
+    - name: Check if swap is disabled
+      shell: swapon --show
+      register: swap_status
+      changed_when: false
+      
+    - name: Fail if swap is enabled
+      fail:
+        msg: "Swap is still enabled. Please disable swap before initializing the cluster."
+      when: swap_status.stdout != ""
+      
+    - name: Check if containerd is running
+      systemd:
+        name: containerd
+        state: started
+      register: containerd_status
+      check_mode: true
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if containerd is not running
+      fail:
+        msg: "Containerd is not running. Please ensure containerd is properly installed and running."
+      when: containerd_status.status.ActiveState != "active"
+      
+    - name: Check if required ports are available
+      shell: "netstat -tuln | grep -w {{ item }} || true"
+      loop:
+        - 6443   # kube-apiserver
+        - 10250  # kubelet
+        - 10251  # kube-scheduler
+        - 10252  # kube-controller-manager
+      register: port_check
+      changed_when: false
+      when: not k8s_initialized.stat.exists
+      
+    - name: Identify ports in use
+      set_fact:
+        ports_in_use: "{{ ports_in_use | default([]) + [item.item] }}"
+      loop: "{{ port_check.results | default([]) }}"
+      when: 
+        - not k8s_initialized.stat.exists 
+        - item.stdout != ""
+      
+    - name: Fail if required ports are in use
+      fail:
+        msg: "The following ports are already in use: {{ ports_in_use | join(', ') }}. Please ensure all required ports are available."
+      when: 
+        - not k8s_initialized.stat.exists
+        - ports_in_use is defined and ports_in_use | length > 0
+      
+    # Initialize Kubernetes cluster
+    - name: Pull required container images
+      command: kubeadm config images pull --kubernetes-version {{ kubernetes_version }}
+      when: not k8s_initialized.stat.exists
+      register: pull_images
+      changed_when: "'pulled' in pull_images.stdout"
+      
+    - name: Create kubeadm config file directly
+      copy:
+        dest: /tmp/kubeadm-config.yaml
+        content: |
+          ---
+          # kubeadm-config
+          apiVersion: kubeadm.k8s.io/v1beta3
+          kind: InitConfiguration
+          nodeRegistration:
+            name: {{ ansible_hostname }}
+            criSocket: unix:///run/containerd/containerd.sock
+            taints: []
+          localAPIEndpoint:
+            advertiseAddress: {{ hostvars[groups['control_plane'][0]]['ansible_host'] }}
+            bindPort: 6443
+          ---
+          apiVersion: kubeadm.k8s.io/v1beta3
+          kind: ClusterConfiguration
+          kubernetesVersion: v{{ kubernetes_version }}
+          networking:
+            serviceSubnet: {{ service_cidr }}
+            podSubnet: {{ pod_network_cidr }}
+          controlPlaneEndpoint: "{{ control_plane_endpoint }}:6443"
+          apiServer:
+            certSANs:
+            - "{{ apiserver_cert_extra_sans }}"
+            - "{{ ansible_hostname }}"
+            - "{{ ansible_default_ipv4.address | default(ansible_host) }}"
+            - "127.0.0.1"
+          controllerManager:
+            extraArgs:
+              bind-address: 0.0.0.0
+          scheduler:
+            extraArgs:
+              bind-address: 0.0.0.0
+          ---
+          apiVersion: kubelet.config.k8s.io/v1beta1
+          kind: KubeletConfiguration
+          cgroupDriver: systemd
+        owner: root
+        group: root
+        mode: '0600'
+      when: not k8s_initialized.stat.exists
+      
+    - name: Initialize Kubernetes cluster with kubeadm
+      command: kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs
+      register: kubeadm_init
+      when: not k8s_initialized.stat.exists
+      
+    - name: Display kubeadm init output
+      debug:
+        var: kubeadm_init.stdout_lines
+      when: kubeadm_init.changed
+      
+    # Setup kubectl for the Ubuntu user
+    - name: Create .kube directory for Ubuntu user
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      
+    - name: Copy admin.conf to Ubuntu user's .kube directory
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/{{ ansible_user }}/.kube/config
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+      
+    # Install Cilium CNI via the cilium CLI
+    - name: Detect host architecture for cilium CLI
+      set_fact:
+        cilium_cli_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+    - name: Download cilium CLI tarball
+      get_url:
+        url: "https://github.com/cilium/cilium-cli/releases/download/{{ cilium_cli_version }}/cilium-linux-{{ cilium_cli_arch }}.tar.gz"
+        dest: "/tmp/cilium-cli.tar.gz"
+        mode: '0644'
+      when: kubeadm_init.changed
+
+    - name: Extract cilium CLI into /usr/local/bin
+      unarchive:
+        src: /tmp/cilium-cli.tar.gz
+        dest: /usr/local/bin
+        remote_src: yes
+        creates: /usr/local/bin/cilium
+      when: kubeadm_init.changed
+
+    - name: Remove cilium CLI tarball
+      file:
+        path: /tmp/cilium-cli.tar.gz
+        state: absent
+      changed_when: false
+
+    - name: Install Cilium into the cluster
+      command: >-
+        cilium install
+        --version {{ cilium_version }}
+        --set ipam.operator.clusterPoolIPv4PodCIDRList={{ pod_network_cidr }}
+        --set kubeProxyReplacement=true
+        --set k8sServiceHost={{ hostvars[groups['control_plane'][0]]['ansible_host'] }}
+        --set k8sServicePort=6443
+      become: false
+      environment:
+        KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+      when: kubeadm_init.changed
+
+    - name: Wait for Cilium to report Ready status
+      command: cilium status --wait --wait-duration 10m
+      become: false
+      environment:
+        KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+      register: cilium_ready
+      changed_when: false
+      failed_when: false
+      when: kubeadm_init.changed
+      
+    # Verify cluster is operational
+    - name: Wait for control-plane node to be ready
+      command: kubectl wait --for=condition=Ready node/{{ ansible_hostname }} --timeout=300s
+      become: false
+      environment:
+        KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+      register: node_ready
+      changed_when: false
+      retries: 10
+      delay: 30
+      when: kubeadm_init.changed
+      until: node_ready is succeeded
+      
+    - name: Verify all pods are running
+      command: kubectl get pods -A
+      become: false
+      environment:
+        KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+      register: pods_status
+      changed_when: false
+      
+    - name: Display cluster status
+      debug:
+        msg: "Kubernetes cluster is initialized and operational."
+      when: k8s_initialized.stat.exists or kubeadm_init.changed
+      
+    # Generate join command for worker nodes
+    - name: Generate join command for worker nodes
+      command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+      
+    - name: Store join command
+      copy:
+        content: "{{ join_command.stdout }}"
+        dest: /home/{{ ansible_user }}/k8s_join_command.sh
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0700'
+      
+    - name: Display join command
+      debug:
+        var: join_command.stdout
+
+- name: Join worker nodes to Kubernetes cluster
+  hosts: workers
+  gather_facts: true
+  any_errors_fatal: true
+  
+  pre_tasks:
+    - name: Retrieve join command from control plane
+      command: cat /home/{{ ansible_user }}/k8s_join_command.sh
+      register: join_command
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      changed_when: false
+      
+    - name: Set join command as a fact
+      set_fact:
+        k8s_join_command: "{{ join_command.stdout }}"
+  
+  tasks:
+    # Prerequisite checks before joining
+    - name: Check if Kubernetes is already joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: k8s_joined
+      
+    - name: Check if swap is disabled
+      shell: swapon --show
+      register: swap_status
+      changed_when: false
+      
+    - name: Fail if swap is enabled
+      fail:
+        msg: "Swap is still enabled. Please disable swap before joining the cluster."
+      when: swap_status.stdout != ""
+      
+    - name: Check if containerd is running
+      systemd:
+        name: containerd
+        state: started
+      register: containerd_status
+      check_mode: true
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if containerd is not running
+      fail:
+        msg: "Containerd is not running. Please ensure containerd is properly installed and running."
+      when: containerd_status.status.ActiveState != "active"
+    
+    # Join worker nodes to the cluster
+    - name: Join worker node to the cluster
+      command: "{{ k8s_join_command }}"
+      register: join_result
+      when: not k8s_joined.stat.exists
+      
+    - name: Display join result
+      debug:
+        var: join_result.stdout_lines
+      when: join_result.changed
+      
+    # Verify node joined successfully
+    - name: Pause to allow node to register with the cluster
+      pause:
+        seconds: 30
+      when: join_result.changed
+      
+    - name: Display node join status
+      debug:
+        msg: "Node {{ ansible_hostname }} has successfully joined the Kubernetes cluster."
+      when: k8s_joined.stat.exists or join_result.changed
+
+- name: Verify cluster status from control plane
+  hosts: control_plane
+  gather_facts: false
+  tasks:
+    - name: Get nodes status
+      command: kubectl get nodes -o wide
+      become: false
+      environment:
+        KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+      register: nodes_status
+      changed_when: false
+      
+    - name: Display nodes status
+      debug:
+        var: nodes_status.stdout_lines
+        
+    - name: Get pods status across all namespaces
+      command: kubectl get pods -A
+      become: false
+      environment:
+        KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+      register: all_pods
+      changed_when: false
+      
+    - name: Display all pods status
+      debug:
+        var: all_pods.stdout_lines
+        
+    - name: Display successful completion message
+      debug:
+        msg: |
+          Kubernetes cluster installation complete!
+          -----------------------------------------
+          Control Plane: {{ groups['control_plane'] | join(', ') }}
+          Workers: {{ groups['workers'] | join(', ') }}
+          
+          Use 'kubectl' on the control plane node to manage your cluster.

@@ -1,0 +1,108 @@
+---
+# Test deployment: 4 nginx pods spread across the 4 cluster nodes.
+# Each response identifies which pod/container served it (pod name, pod IP, node).
+#
+# Pattern derived from:
+#   mydocs-plog-nextra/sites/kubsec/content/Concepts/Calico/lab-gude-sample.md
+# Extended with the Downward API so each replica reports its own identity.
+#
+# Apply:
+#   kubectl apply -f tests/nginx-4-instances.yaml
+#
+# Watch pods spread across nodes:
+#   kubectl -n nginx-demo get pods -o wide
+#
+# Hit the service repeatedly and watch the pod/IP change:
+#   NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+#   for i in $(seq 1 12); do curl -s http://${NODE_IP}:30080/; done
+#
+# Tear down:
+#   kubectl delete -f tests/nginx-4-instances.yaml
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nginx-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-hello
+  namespace: nginx-demo
+  labels:
+    app: nginx-hello
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: nginx-hello
+  template:
+    metadata:
+      labels:
+        app: nginx-hello
+    spec:
+      # Spread across nodes. "preferred" so it still schedules if a node is missing;
+      # bump to requiredDuringSchedulingIgnoredDuringExecution for a hard guarantee.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: nginx-hello
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              cat >/usr/share/nginx/html/index.html <<EOF
+              <!doctype html>
+              <html><head><title>nginx-hello</title></head>
+              <body>
+              <h1>Hello from ${POD_NAME}</h1>
+              <ul>
+                <li><b>Pod name:</b> ${POD_NAME}</li>
+                <li><b>Pod IP:</b>   ${POD_IP}</li>
+                <li><b>Node:</b>     ${NODE_NAME}</li>
+                <li><b>Container hostname:</b> $(hostname)</li>
+              </ul>
+              </body></html>
+              EOF
+              exec nginx -g 'daemon off;'
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-hello
+  namespace: nginx-demo
+spec:
+  type: NodePort
+  selector:
+    app: nginx-hello
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 30080

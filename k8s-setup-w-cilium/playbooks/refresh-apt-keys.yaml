@@ -1,0 +1,79 @@
+---
+# Refresh rotated signing keys for third-party apt repos (Trivy, Falco).
+# Detects the keyring path from each repo's .list file (signed-by=...) so it
+# works regardless of whether keys live under /etc/apt/keyrings or /usr/share/keyrings.
+#
+# Run with: bash run.sh playbooks/refresh-apt-keys.yaml
+
+- name: Refresh third-party apt signing keys
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    repos:
+      - name: trivy
+        key_url: https://aquasecurity.github.io/trivy-repo/deb/public.key
+        list_match: aquasecurity.github.io/trivy-repo
+        default_path: /usr/share/keyrings/trivy.gpg
+      - name: falco
+        key_url: https://falco.org/repo/falcosecurity-packages.asc
+        list_match: "download.falco.org|falcosecurity"
+        default_path: /usr/share/keyrings/falco-archive-keyring.gpg
+
+  tasks:
+    - name: Ensure gpg and curl are present
+      ansible.builtin.apt:
+        name:
+          - gpg
+          - curl
+          - ca-certificates
+        state: present
+        update_cache: no
+        lock_timeout: 300
+
+    - name: Detect keyring path from sources list
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -rhE "signed-by=" /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null \
+          | grep -E "{{ item.list_match }}" \
+          | sed -n 's/.*signed-by=\([^] ]*\).*/\1/p' \
+          | head -n1
+      args:
+        executable: /bin/bash
+      register: detected_paths
+      changed_when: false
+      failed_when: false
+      loop: "{{ repos }}"
+
+    - name: Refresh signing key and patch legacy .list files
+      ansible.builtin.shell: |
+        set -euo pipefail
+        path="{{ (item.1.stdout | trim) if (item.1.stdout | trim) != '' else item.0.default_path }}"
+        mkdir -p "$(dirname "$path")"
+        tmp="$(mktemp)"
+        curl -fsSL "{{ item.0.key_url }}" -o "$tmp"
+        gpg --dearmor --yes -o "$path" "$tmp"
+        chmod 0644 "$path"
+        rm -f "$tmp"
+        echo "refreshed: $path"
+
+        # Patch any .list files matching this repo that lack signed-by=
+        for f in $(grep -rlE '{{ item.0.list_match }}' /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null || true); do
+          if ! grep -qE 'signed-by=' "$f"; then
+            sed -i -E "s#^(deb)[[:space:]]+(https?://\S+)#\1 [signed-by=${path}] \2#" "$f"
+            echo "patched: $f"
+          fi
+        done
+      args:
+        executable: /bin/bash
+      loop: "{{ repos | zip(detected_paths.results) | list }}"
+      loop_control:
+        label: "{{ item.0.name }}"
+      register: refresh_result
+      changed_when: "'refreshed:' in refresh_result.stdout or 'patched:' in refresh_result.stdout"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        lock_timeout: 300

@@ -1,0 +1,184 @@
+---
+# Kubernetes Cluster Cleanup Playbook (v2)
+# This playbook removes all Kubernetes components from all nodes, including handling held packages
+
+- name: Reset Kubernetes components on all nodes
+  hosts: k8s_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  become: true
+
+  tasks:
+    - name: Check if kubeadm is installed
+      command: which kubeadm
+      register: kubeadm_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Reset Kubernetes cluster with kubeadm
+      command: kubeadm reset --force
+      when: kubeadm_check.rc == 0
+      ignore_errors: true
+
+    - name: Stop and disable kubelet service
+      systemd:
+        name: kubelet
+        state: stopped
+        enabled: no
+      ignore_errors: true
+
+    - name: Stop and disable containerd service
+      systemd:
+        name: containerd
+        state: stopped
+        enabled: no
+      ignore_errors: true
+
+    - name: Remove Kubernetes directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/etcd
+        - /var/run/kubernetes
+        - /var/lib/cni
+        - /etc/cni
+        - /opt/cni
+        - "{{ ansible_env.HOME }}/.kube"
+        - "/home/{{ ansible_user }}/.kube"
+
+    - name: Delete network interfaces
+      shell: |
+        ip link delete cni0 || true
+        ip link delete flannel.1 || true
+        ip link delete cilium_host || true
+        ip link delete cilium_net || true
+        ip link delete cilium_vxlan || true
+        for link in $(ip -br link show type veth 2>/dev/null | awk '/^lxc/ {print $1}' | cut -d@ -f1); do
+          ip link delete "$link" || true
+        done
+      changed_when: false
+      ignore_errors: true
+
+    - name: Flush iptables rules
+      shell: |
+        iptables -F
+        iptables -t nat -F
+        iptables -t mangle -F
+        iptables -X
+      changed_when: true
+      ignore_errors: true
+
+    - name: Restart networking
+      service:
+        name: systemd-networkd
+        state: restarted
+      ignore_errors: true
+
+    - name: Remove CNI configuration files
+      file:
+        path: /etc/cni/net.d
+        state: absent
+      ignore_errors: true
+
+    - name: Unhold Kubernetes packages
+      shell: |
+        apt-mark unhold kubeadm kubectl kubelet || true
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove all Kubernetes packages (with allow-change-held-packages)
+      apt:
+        name:
+          - kubeadm
+          - kubectl
+          - kubelet
+        state: absent
+        purge: yes
+        autoremove: yes
+        allow_change_held_packages: yes
+      ignore_errors: true
+
+    - name: Remove containerd
+      apt:
+        name: containerd
+        state: absent
+        purge: yes
+        autoremove: yes
+      ignore_errors: true
+
+    - name: Clean apt cache
+      apt:
+        autoclean: yes
+      ignore_errors: true
+
+    - name: Remove Kubernetes repositories
+      file:
+        path: /etc/apt/sources.list.d/kubernetes.list
+        state: absent
+      ignore_errors: true
+
+    - name: Remove Kubernetes apt keys
+      file:
+        path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        state: absent
+      ignore_errors: true
+
+    - name: Clean up kernel modules configuration
+      file:
+        path: /etc/modules-load.d/k8s.conf
+        state: absent
+      ignore_errors: true
+
+    - name: Clean up sysctl configuration
+      file:
+        path: /etc/sysctl.d/k8s.conf
+        state: absent
+      ignore_errors: true
+
+    - name: Remove crictl configuration
+      file:
+        path: /etc/crictl.yaml
+        state: absent
+      ignore_errors: true
+
+    - name: Remove crictl from PATH
+      file:
+        path: /usr/local/bin/crictl
+        state: absent
+      ignore_errors: true
+
+    - name: Remove join command file
+      file:
+        path: "/home/{{ ansible_user }}/k8s_join_command.sh"
+        state: absent
+      ignore_errors: true
+      when: "'workers' in group_names"
+
+    - name: Remove cilium CLI binary
+      file:
+        path: /usr/local/bin/cilium
+        state: absent
+      ignore_errors: true
+
+    - name: Remove cilium state directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/run/cilium
+        - /sys/fs/bpf/tc
+      ignore_errors: true
+      when: "'control_plane' in group_names"
+
+    - name: Verify Kubernetes components are removed
+      shell: dpkg -l | grep -E 'kube|containerd'
+      register: check_k8s_packages
+      changed_when: false
+      failed_when: false
+
+    - name: Display cleanup status
+      debug:
+        msg: "{{ 'Kubernetes components still present:' + check_k8s_packages.stdout if check_k8s_packages.stdout != '' else 'All Kubernetes components have been removed successfully.' }}"
