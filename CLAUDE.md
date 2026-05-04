@@ -8,6 +8,8 @@ This repo contains Ansible-driven tooling to stand up a 4-node Kubernetes cluste
 
 The active project lives in [k8s-setup-w-cilium/](k8s-setup-w-cilium/). The README references a sibling [../k8s-setup-w-calico/](../k8s-setup-w-calico/) Calico variant; that directory is not in this checkout.
 
+Post-install add-ons live as standalone shell scripts in sibling directories: [metallb-installation/](metallb-installation/) installs and tears down MetalLB. These run against an already-built cluster via the merged kubeconfig from `fetch-kubeconfig.sh` — they are not Ansible plays and are not invoked by `run.sh`.
+
 ## Where commands run
 
 **All commands must be run from inside `k8s-setup-w-cilium/`** — both [run.sh](k8s-setup-w-cilium/run.sh) and [scripts/fetch-kubeconfig.sh](k8s-setup-w-cilium/scripts/fetch-kubeconfig.sh) resolve paths relative to `$PWD` (e.g. `inventory/node-ssh-key`). [ansible.cfg](k8s-setup-w-cilium/ansible.cfg) points at `inventory/nodes.ini` as a relative path.
@@ -70,3 +72,11 @@ Each log opens/closes with a banner showing args + exit code. Reference these wh
 ## Hubble / traffic generation
 
 Hubble is **off by default**. See [README-HUBBLE.md](k8s-setup-w-cilium/README-HUBBLE.md) for the post-install enable flow (`cilium hubble enable --ui` → `cilium hubble port-forward &`). [README-TRAFFIC-GEN.md](k8s-setup-w-cilium/README-TRAFFIC-GEN.md) has cross-namespace curl snippets useful for exercising NetworkPolicies and watching flows.
+
+## MetalLB (LoadBalancer support)
+
+Cilium's install does **not** provide LoadBalancer IP allocation, so Services of `type: LoadBalancer` stay `<pending>` out of the box. [metallb-installation/setup-metallb.sh](metallb-installation/setup-metallb.sh) applies the upstream `metallb-native.yaml` manifest (pinned to `v0.15.3`), waits on the controller/speaker pods, then creates an `IPAddressPool` (`first-pool`, range `192.168.48.201-192.168.48.205`) and an `L2Advertisement`. The address range is on the same `192.168.48.0/24` subnet as the nodes (`.31-.34`), which is required for L2 mode — the speaker ARPs for these IPs from the nodes themselves. The script also creates a stub `test-service` whose selector matches no pods; this is just to confirm IP allocation by `kubectl get svc`.
+
+[metallb-installation/teardown-metallb.sh](metallb-installation/teardown-metallb.sh) reverses the install in order (test-service → L2Advertisement → IPAddressPool → manifest delete), then `kubectl wait --for=delete namespace/metallb-system` and verifies no `metallb.io` CRDs remain. Both scripts use the caller's current kubeconfig context — point at the cluster via `fetch-kubeconfig.sh` first.
+
+To bump the MetalLB version, edit the `v0.15.3` URL in **both** scripts (`setup-metallb.sh` line 7 and `teardown-metallb.sh`'s `METALLB_MANIFEST` variable) so teardown deletes what setup applied.
