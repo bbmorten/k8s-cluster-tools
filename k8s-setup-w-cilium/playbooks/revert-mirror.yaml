@@ -1,0 +1,71 @@
+---
+# revert-mirror.yml
+# Restores the most recent apt sources backup created by switch-mirror-tr.yml.
+# Works for both deb822 (ubuntu.sources) and legacy (sources.list) formats.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini revert-mirror.yml -K
+#
+# Dry run first to see what would happen:
+#   ansible-playbook -i inventory.ini revert-mirror.yml --check -v
+
+- name: Revert apt sources to most recent backup
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Detect which sources format is in use
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/ubuntu.sources
+      register: deb822_sources
+
+    - name: Set target file based on format
+      ansible.builtin.set_fact:
+        target_file: "{{ '/etc/apt/sources.list.d/ubuntu.sources' if deb822_sources.stat.exists else '/etc/apt/sources.list' }}"
+        backup_dir:  "{{ '/etc/apt/sources.list.d' if deb822_sources.stat.exists else '/etc/apt' }}"
+        backup_glob: "{{ 'ubuntu.sources.bak-*' if deb822_sources.stat.exists else 'sources.list.bak-*' }}"
+
+    - name: Find all backups
+      ansible.builtin.find:
+        paths: "{{ backup_dir }}"
+        patterns: "{{ backup_glob }}"
+        file_type: file
+      register: backups
+
+    - name: Fail if no backup exists
+      ansible.builtin.fail:
+        msg: "No backups matching {{ backup_glob }} found in {{ backup_dir }}. Nothing to revert."
+      when: backups.files | length == 0
+
+    - name: Pick the newest backup
+      ansible.builtin.set_fact:
+        latest_backup: "{{ (backups.files | sort(attribute='mtime') | last).path }}"
+
+    - name: Show what will be restored
+      ansible.builtin.debug:
+        msg: "Restoring {{ latest_backup }} → {{ target_file }}"
+
+    - name: Save current file as pre-revert snapshot
+      ansible.builtin.copy:
+        src: "{{ target_file }}"
+        dest: "{{ target_file }}.pre-revert-{{ ansible_date_time.iso8601_basic_short | default(lookup('pipe', 'date +%Y%m%dT%H%M%S')) }}"
+        remote_src: true
+      when: not ansible_check_mode
+
+    - name: Restore the backup
+      ansible.builtin.copy:
+        src: "{{ latest_backup }}"
+        dest: "{{ target_file }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Run apt update to confirm reverted mirror works
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Confirm revert
+      ansible.builtin.debug:
+        msg: "Reverted {{ inventory_hostname }} from TR mirror back to {{ latest_backup | basename }}"

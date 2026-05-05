@@ -1,0 +1,128 @@
+---
+# switch-mirror-tr.yml
+# Switches Ubuntu apt sources to the Turkish mirror (tr.archive.ubuntu.com).
+# Redirects BOTH archive and security URIs to the TR mirror.
+# Handles both legacy sources.list (≤22.04) and deb822 ubuntu.sources (24.04+).
+#
+# Usage:
+#   ansible-playbook -i inventory.ini switch-mirror-tr.yml -K
+#
+# Override the mirror at runtime:
+#   ansible-playbook ... -e "tr_mirror=https://ftp.linux.org.tr/ubuntu"
+#
+# Keep security on Canonical (NOT recommended unless your TR mirror lags):
+#   ansible-playbook ... -e "tr_security_mirror=http://security.ubuntu.com/ubuntu"
+
+- name: Switch Ubuntu apt sources to TR mirror
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # Official country mirror (CNAME, load-balanced across TR mirrors).
+    # Alternatives:
+    #   https://ftp.linux.org.tr/ubuntu        (LKD, direct)
+    #   https://mirror.veritescil.com.tr/ubuntu
+    tr_mirror: "http://tr.archive.ubuntu.com/ubuntu"
+
+    # By default, point security at the same TR mirror. Most TR mirrors
+    # (tr.archive.ubuntu.com, ftp.linux.org.tr, etc.) do carry -security
+    # pockets. Override at runtime if your chosen mirror doesn't.
+    tr_security_mirror: "{{ tr_mirror }}"
+
+    # Archive URIs to replace.
+    old_archive_mirrors:
+      - "http://archive.ubuntu.com/ubuntu"
+      - "https://archive.ubuntu.com/ubuntu"
+      - "http://us.archive.ubuntu.com/ubuntu"
+      - "https://us.archive.ubuntu.com/ubuntu"
+
+    # Security URIs to replace. Kept separate because they map to a
+    # different target (tr_security_mirror) — usually the same as
+    # tr_mirror, but configurable.
+    old_security_mirrors:
+      - "http://security.ubuntu.com/ubuntu"
+      - "https://security.ubuntu.com/ubuntu"
+
+  pre_tasks:
+    - name: Verify this is Ubuntu
+      ansible.builtin.assert:
+        that: ansible_distribution == "Ubuntu"
+        fail_msg: "This playbook only supports Ubuntu, got {{ ansible_distribution }}"
+
+    - name: Detect which sources format is in use
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/ubuntu.sources
+      register: deb822_sources
+
+  tasks:
+    # -------- Modern Ubuntu (24.04+) — deb822 format --------
+    - name: "[deb822] Back up ubuntu.sources"
+      ansible.builtin.copy:
+        src: /etc/apt/sources.list.d/ubuntu.sources
+        dest: "/etc/apt/sources.list.d/ubuntu.sources.bak-{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        force: false
+      when: deb822_sources.stat.exists
+
+    - name: "[deb822] Replace archive URIs with TR mirror"
+      ansible.builtin.replace:
+        path: /etc/apt/sources.list.d/ubuntu.sources
+        regexp: '{{ item | regex_escape }}'
+        replace: "{{ tr_mirror }}"
+      loop: "{{ old_archive_mirrors }}"
+      when: deb822_sources.stat.exists
+      notify: apt update
+
+    - name: "[deb822] Replace security URIs with TR mirror"
+      ansible.builtin.replace:
+        path: /etc/apt/sources.list.d/ubuntu.sources
+        regexp: '{{ item | regex_escape }}'
+        replace: "{{ tr_security_mirror }}"
+      loop: "{{ old_security_mirrors }}"
+      when: deb822_sources.stat.exists
+      notify: apt update
+
+    # -------- Legacy Ubuntu (≤22.04) — sources.list --------
+    - name: "[legacy] Back up sources.list"
+      ansible.builtin.copy:
+        src: /etc/apt/sources.list
+        dest: "/etc/apt/sources.list.bak-{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        force: false
+      when: not deb822_sources.stat.exists
+
+    - name: "[legacy] Replace archive URIs with TR mirror"
+      ansible.builtin.replace:
+        path: /etc/apt/sources.list
+        regexp: '{{ item | regex_escape }}'
+        replace: "{{ tr_mirror }}"
+      loop: "{{ old_archive_mirrors }}"
+      when: not deb822_sources.stat.exists
+      notify: apt update
+
+    - name: "[legacy] Replace security URIs with TR mirror"
+      ansible.builtin.replace:
+        path: /etc/apt/sources.list
+        regexp: '{{ item | regex_escape }}'
+        replace: "{{ tr_security_mirror }}"
+      loop: "{{ old_security_mirrors }}"
+      when: not deb822_sources.stat.exists
+      notify: apt update
+
+    # -------- Verify the new mirror actually works --------
+    - name: Run apt update to confirm mirror reachability
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Show new mirrors in use
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_distribution_version }}):
+          archive → {{ tr_mirror }},
+          security → {{ tr_security_mirror }}
+
+  handlers:
+    - name: apt update
+      ansible.builtin.apt:
+        update_cache: true
