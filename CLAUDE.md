@@ -14,6 +14,8 @@ Post-install add-ons live in sibling directories:
 - [registry-installation/](registry-installation/) — its own self-contained Ansible project (mirrors the `k8s-setup-w-cilium/` shape: `run.sh`, `ansible.cfg`, `inventory/`, `playbooks/`) that installs nerdctl + a Docker registry container on the control plane and wires every node's containerd to use it as an insecure mirror. Has its own `run.sh` and inventory copied from `k8s-setup-w-cilium/inventory/` — keep both in sync if you change IPs.
 - [ingress-nginx-w-certificate/](ingress-nginx-w-certificate/) — shell-script lab demo (no SSH to nodes, pure `kubectl apply`) that installs ingress-nginx behind a MetalLB IP and exposes two demo hostnames with different backend TLS modes. Mirrors `metallb-installation/` style.
 - [controller-crds-operators/](controller-crds-operators/) — teaching lab that scaffolds a kubebuilder operator (a `Website` CRD whose controller materialises a Deployment + Service + ConfigMap). Two student paths: read [scenario.md](controller-crds-operators/scenario.md) + follow [README.md](controller-crds-operators/README.md) by hand, or run `prereq-check.sh` → `setup-lab.sh` → `demo-magic.sh` → `teardown-lab.sh`. Not Ansible — pure shell + Go via kubebuilder.
+- [service-types-examples/](service-types-examples/) — shell-script lab demonstrating the five Service flavors (ClusterIP / NodePort / LoadBalancer / ExternalName / Headless) in the `svc-types-demo` namespace. All selector-based Services share one `web-backend` nginx Deployment. `setup-service-types.sh` applies `manifests/00-…60-` in numeric order; `teardown-service-types.sh` reverses. The LoadBalancer example needs MetalLB; the others don't. Same shape as `metallb-installation/` — uses the caller's current `kubectl` context, no Ansible, no inventory.
+- [cilium-HUBBLE/](cilium-HUBBLE/) — top-level docs-only directory holding [01-README-HUBBLE.md](cilium-HUBBLE/01-README-HUBBLE.md) (post-install Hubble enable flow) and [02-README-TRAFFIC-GEN.md](cilium-HUBBLE/02-README-TRAFFIC-GEN.md) (cross-namespace curl snippets for exercising NetworkPolicies). These were moved here from `k8s-setup-w-cilium/` in commit 49b24c7 — keep that in mind when grepping for `README-HUBBLE.md`.
 
 ## Where commands run
 
@@ -38,6 +40,10 @@ bash run.sh playbooks/delete-cluster.yaml
 bash run.sh playbooks/refresh-apt-keys.yaml   # rotate Trivy/Falco signing keys
 bash run.sh playbooks/reboot-hosts.yaml       # rolling reboot
 
+# Switch all nodes' apt sources to a Turkish mirror (archive + security URIs)
+bash run.sh playbooks/switch-mirror-tr-w-sec.yaml
+bash run.sh playbooks/revert-mirror.yaml      # restore most recent backup
+
 # Pull admin kubeconfig to workstation (merges into ~/.kube/config by default)
 bash scripts/fetch-kubeconfig.sh
 bash scripts/fetch-kubeconfig.sh --standalone ~/.kube/cilium-lab.conf
@@ -54,6 +60,8 @@ bash scripts/fetch-kubeconfig.sh --standalone ~/.kube/cilium-lab.conf
 **The `containerd` package lives in Ubuntu's `universe` repo.** Play (3) explicitly enables `universe` before `apt install containerd` because cloud images can ship with main-only sources, in which case the install fails with "No package matching 'containerd' is available". The enable step first greps `/etc/apt/sources.list.d/ubuntu.sources` (deb822) for an existing `universe` component and **only invokes `apt_repository` if it's missing** — otherwise the one-line file `apt_repository` writes (`archive_ubuntu_com_ubuntu.list`) duplicates the deb822 entry and apt warns "Target ... is configured multiple times". The same play also removes that legacy `.list` if it was created by an earlier run.
 
 **[apt-update-upgrade.yaml](k8s-setup-w-cilium/playbooks/apt-update-upgrade.yaml) does not touch apt sources.** It mirrors the apt update/upgrade pattern from `install-cluster.yaml` play (2): wait on apt locks (lsof loop), `update_cache` and `upgrade: full` (with `force_apt_get: yes`, `autoremove`, `autoclean`), each retried 5×. Whatever mirror the node is configured against is used as-is — if a mirror is unreachable, fix it on the node (or re-add a `replace:` task here). Unlike install-cluster.yaml's update step it deliberately omits `cache_valid_time`: this is the "patch the nodes" tool, so always re-fetch indices even if another step refreshed them minutes ago — without that, a 12-minute-old cache that happened to be incomplete will silently report "0 upgraded" and miss real security updates. Pass `-e perform_reboot=yes` to actually reboot when `/var/run/reboot-required` is set; otherwise the playbook only reports it.
+
+**Mirror switching is a separate concern from `apt-update-upgrade.yaml`.** [switch-mirror-tr-w-sec.yaml](k8s-setup-w-cilium/playbooks/switch-mirror-tr-w-sec.yaml) rewrites apt source URIs to a TR mirror — by default `http://tr.archive.ubuntu.com/ubuntu` for **both** archive and security pockets (override via `-e tr_mirror=...` and/or `-e tr_security_mirror=...`). It detects whether the host uses deb822 (`/etc/apt/sources.list.d/ubuntu.sources`, 24.04+) or the legacy `/etc/apt/sources.list` and edits whichever is present. Each run takes a timestamped backup (`ubuntu.sources.bak-<iso8601>` or `sources.list.bak-<iso8601>`) **before** modifying — `force: false` on the backup copy means a single run produces one backup; re-runs do not overwrite earlier backups. A trailing `apt update` task confirms the new mirror is reachable and fails the play if it isn't. [revert-mirror.yaml](k8s-setup-w-cilium/playbooks/revert-mirror.yaml) finds the **most recent** matching `*.bak-*` file (sorted by mtime), saves the current file as a `.pre-revert-<ts>` snapshot, then restores the backup. The two playbooks target `hosts: all`, so they hit every node in the inventory regardless of group.
 
 **Versions are pinned inline.** To bump, edit [install-cluster.yaml](k8s-setup-w-cilium/playbooks/install-cluster.yaml): `kubernetes_version` (1.32.2), `cilium_version` (1.16.5), `cilium_cli_version` (v0.16.24), plus the two `v1.32` strings in the apt repo URL/path. Pod CIDR `10.244.0.0/16`, service CIDR `10.96.0.0/12`.
 
@@ -76,7 +84,7 @@ Each log opens/closes with a banner showing args + exit code. Reference these wh
 
 ## Hubble / traffic generation
 
-Hubble is **off by default**. See [README-HUBBLE.md](k8s-setup-w-cilium/README-HUBBLE.md) for the post-install enable flow (`cilium hubble enable --ui` → `cilium hubble port-forward &`). [README-TRAFFIC-GEN.md](k8s-setup-w-cilium/README-TRAFFIC-GEN.md) has cross-namespace curl snippets useful for exercising NetworkPolicies and watching flows.
+Hubble is **off by default**. See [cilium-HUBBLE/01-README-HUBBLE.md](cilium-HUBBLE/01-README-HUBBLE.md) for the post-install enable flow (`cilium hubble enable --ui` → `cilium hubble port-forward &`). [cilium-HUBBLE/02-README-TRAFFIC-GEN.md](cilium-HUBBLE/02-README-TRAFFIC-GEN.md) has cross-namespace curl snippets useful for exercising NetworkPolicies and watching flows.
 
 ## MetalLB (LoadBalancer support)
 
