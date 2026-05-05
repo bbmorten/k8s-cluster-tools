@@ -1,0 +1,74 @@
+---
+# Backend Deployment used by every Service in this lab (ClusterIP, NodePort,
+# LoadBalancer, Headless). ExternalName has no selector so it does NOT use this.
+#
+# Each replica renders its own pod name / pod IP / node name into index.html
+# via the Downward API, so a `curl` loop visibly load-balances across pods.
+#
+# Spread across nodes (preferred) so all four Service types resolve to >1 pod
+# and the round-robin is observable.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-backend
+  namespace: svc-types-demo
+  labels:
+    app: web-backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-backend
+  template:
+    metadata:
+      labels:
+        app: web-backend
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: web-backend
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              cat >/usr/share/nginx/html/index.html <<EOF
+              <!doctype html>
+              <html><head><title>web-backend</title></head>
+              <body>
+              <h1>Hello from ${POD_NAME}</h1>
+              <ul>
+                <li><b>Pod name:</b> ${POD_NAME}</li>
+                <li><b>Pod IP:</b>   ${POD_IP}</li>
+                <li><b>Node:</b>     ${NODE_NAME}</li>
+              </ul>
+              </body></html>
+              EOF
+              exec nginx -g 'daemon off;'
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 10

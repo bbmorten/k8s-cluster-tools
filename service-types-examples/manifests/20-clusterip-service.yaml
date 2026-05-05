@@ -1,0 +1,28 @@
+---
+# Service type: ClusterIP (the default if `type:` is omitted).
+#
+# Reachable ONLY from inside the cluster, on a stable virtual IP managed by
+# kube-proxy / Cilium. DNS name: web-clusterip.svc-types-demo.svc.cluster.local
+#
+# Test from inside the cluster:
+#   kubectl -n svc-types-demo run curl --rm -it --image=curlimages/curl --restart=Never -- \
+#     sh -c 'for i in 1 2 3 4 5 6; do curl -s http://web-clusterip/; done'
+#
+# Note: from the host workstation this IP is unreachable -- that's the point of
+# ClusterIP. Use NodePort or LoadBalancer to expose externally.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-clusterip
+  namespace: svc-types-demo
+  labels:
+    svc-type: clusterip
+spec:
+  type: ClusterIP
+  selector:
+    app: web-backend
+  ports:
+    - name: http
+      port: 80          # the cluster-internal port
+      targetPort: http  # named port on the pod (containerPort 80)
+      protocol: TCP

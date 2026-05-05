@@ -1,0 +1,10 @@
+---
+# Namespace that owns every Service-type demo object.
+# Keeping them all here makes teardown a one-liner:
+#   kubectl delete namespace svc-types-demo
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: svc-types-demo
+  labels:
+    purpose: service-types-lab

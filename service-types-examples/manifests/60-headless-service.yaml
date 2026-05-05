@@ -1,0 +1,36 @@
+---
+# Service type: Headless (ClusterIP: None).
+#
+# Setting `clusterIP: None` tells kube-proxy NOT to allocate a virtual IP and
+# NOT to set up iptables/ipvs rules. Instead, CoreDNS returns one A record per
+# matching, ready pod. The client picks one (DNS round-robin or its own logic)
+# and connects to the pod IP directly -- no kube-proxy hop.
+#
+# Used for:
+#   * StatefulSets, where each pod needs its own stable DNS name.
+#   * Clients that do their own load balancing (gRPC, database drivers).
+#   * Service discovery without a VIP.
+#
+# Test from inside the cluster:
+#   kubectl -n svc-types-demo run dns --rm -it --image=busybox:1.36 --restart=Never -- \
+#     nslookup web-headless.svc-types-demo.svc.cluster.local
+#   # Expected: one A record per ready backend pod (3 IPs with our Deployment).
+#
+# Compare with `nslookup web-clusterip.svc-types-demo.svc.cluster.local` --
+# the ClusterIP variant returns ONE A record (the VIP).
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-headless
+  namespace: svc-types-demo
+  labels:
+    svc-type: headless
+spec:
+  clusterIP: None     # this is what makes the Service headless
+  selector:
+    app: web-backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

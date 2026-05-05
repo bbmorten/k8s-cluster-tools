@@ -1,0 +1,44 @@
+---
+# Service type: LoadBalancer.
+#
+# A LoadBalancer Service is a superset of NodePort: cluster-internal IP, a
+# nodePort on every node, AND a request to the cloud / on-prem LB integration
+# for an external IP. On bare metal that integration is provided by MetalLB --
+# see ../../metallb-installation/. Without MetalLB this Service stays in
+# EXTERNAL-IP <pending> forever.
+#
+# Reachable from the host workstation directly on the assigned EXTERNAL-IP:
+#   IP=$(kubectl -n svc-types-demo get svc web-loadbalancer \
+#          -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+#   curl http://${IP}/
+#
+# IP pinning (optional). MetalLB picks the next free IP from `first-pool` by
+# default. To always get a specific IP (so /etc/hosts entries on clients keep
+# working across reinstalls), add the annotation below. The IP MUST be inside
+# the IPAddressPool range (default: 192.168.48.201-205) and not already taken
+# by another Service. Note: metallb-installation/setup-metallb.sh creates a
+# stub `test-service` that grabs whatever IP it lands on -- delete it first if
+# it's holding the one you want:
+#   kubectl delete svc test-service -n default
+#
+# Re. externalTrafficPolicy: same trade-off as NodePort. With `Local`, MetalLB
+# only advertises the VIP from nodes that actually run a backend pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-loadbalancer
+  namespace: svc-types-demo
+  labels:
+    svc-type: loadbalancer
+  # annotations:
+  #   metallb.universe.tf/loadBalancerIPs: "192.168.48.203"
+spec:
+  type: LoadBalancer
+  # externalTrafficPolicy: Local   # uncomment to preserve client source IP
+  selector:
+    app: web-backend
+  ports:
+    - name: http
+      port: 80          # the EXTERNAL port clients connect to
+      targetPort: http  # pod port
+      protocol: TCP

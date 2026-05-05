@@ -1,0 +1,40 @@
+---
+# Service type: NodePort.
+#
+# A NodePort Service is a superset of ClusterIP: it still gets an internal
+# clusterIP, AND every node in the cluster opens the same TCP port (here 30090)
+# and forwards traffic to backend pods.
+#
+# Reachable from the host workstation via ANY node IP:
+#   for ip in 192.168.48.31 192.168.48.32 192.168.48.33 192.168.48.34; do
+#     curl -s http://${ip}:30090/ | grep '<h1>'
+#   done
+#
+# The default `externalTrafficPolicy: Cluster` means traffic hitting any node is
+# load-balanced to a pod on potentially a different node (one extra hop, source
+# IP is SNATed to the node IP). Switch to `Local` (uncomment below) to:
+#   - preserve the external client source IP, and
+#   - only route to pods running on the same node that received the packet.
+# The trade-off: nodes with no backend pod will reject the connection.
+#
+# nodePort range is configurable on the apiserver (default 30000-32767). 30090
+# avoids collisions with k8s-setup-w-cilium/tests/nginx-4-instances.yaml which
+# uses 30080.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-nodeport
+  namespace: svc-types-demo
+  labels:
+    svc-type: nodeport
+spec:
+  type: NodePort
+  # externalTrafficPolicy: Local   # uncomment to preserve client source IP
+  selector:
+    app: web-backend
+  ports:
+    - name: http
+      port: 80          # cluster-internal port (still allocated)
+      targetPort: http  # pod port
+      nodePort: 30090   # port opened on every node; omit to let k8s pick one
+      protocol: TCP
