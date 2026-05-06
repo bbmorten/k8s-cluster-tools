@@ -66,7 +66,7 @@ bash run.sh playbooks/teardown-registry.yaml -e remove_nerdctl=false
 
 **Play 2 — every node in `k8s_cluster`:**
 
-1. Creates `/etc/containerd/certs.d/<cp-ip>:5000/` and writes a `hosts.toml` declaring the registry as `http://<cp-ip>:5000` with `skip_verify = true` and `capabilities = ["pull", "resolve", "push"]`.
+1. Creates `/etc/containerd/certs.d/<cp-ip>:5000/` and writes a `hosts.toml` declaring the registry as `http://<cp-ip>:5000` with `capabilities = ["pull", "resolve", "push"]`. Plain HTTP only — no TLS settings (no `skip_verify`, no `ca`, no `client`); the `http://` scheme in `server` and the `[host."..."]` key tells containerd to skip TLS entirely.
 2. Edits `/etc/containerd/config.toml` in place: flips `config_path = ""` to `config_path = "/etc/containerd/certs.d"` under `[plugins."io.containerd.grpc.v1.cri".registry]`. **Nothing else in `config.toml` is touched** — `SystemdCgroup = true` set by `install-cluster.yaml` is preserved.
 3. `systemctl restart containerd` (via handler).
 4. Probes `http://<cp-ip>:5000/v2/` from each node and reports OK/FAIL per host.
@@ -89,7 +89,7 @@ bash run.sh playbooks/teardown-registry.yaml -e remove_nerdctl=false
 
 | Image reference | What containerd does |
 |---|---|
-| `192.168.48.31:5000/myapp:1.0` | reads `/etc/containerd/certs.d/192.168.48.31:5000/hosts.toml`, pulls over plain HTTP, `skip_verify` |
+| `192.168.48.31:5000/myapp:1.0` | reads `/etc/containerd/certs.d/192.168.48.31:5000/hosts.toml`, pulls over plain HTTP (no TLS) |
 | `nginx:1.27` | resolves to `docker.io`, normal HTTPS pull |
 | `registry.k8s.io/pause:3.10` | normal HTTPS pull |
 | `ghcr.io/foo/bar:tag` | normal HTTPS pull |

@@ -127,7 +127,7 @@
         state: directory
         mode: '0755'
 
-    - name: Write registry hosts.toml
+    - name: Write registry hosts.toml (HTTP only — no TLS)
       copy:
         dest: "{{ certs_d_dir }}/{{ registry_endpoint }}/hosts.toml"
         mode: '0644'
@@ -138,7 +138,6 @@
 
           [host."http://{{ registry_endpoint }}"]
             capabilities = ["pull", "resolve", "push"]
-            skip_verify = true
       notify: restart containerd
 
     - name: Point containerd registry config_path at certs.d
