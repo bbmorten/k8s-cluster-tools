@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: startup-demo
+  namespace: pod-probes-demo
+  labels:
+    test: startup
+spec:
+  containers:
+  - name: app
+    image: registry.k8s.io/busybox:1.27.2
+    args:
+    - /bin/sh
+    - -c
+    - sleep 30; touch /tmp/started /tmp/healthy; while true; do sleep 5; done
+    startupProbe:
+      exec:
+        command:
+        - cat
+        - /tmp/started
+      failureThreshold: 30
+      periodSeconds: 5
+    livenessProbe:
+      exec:
+        command:
+        - cat
+        - /tmp/healthy
+      periodSeconds: 5
+      failureThreshold: 1
