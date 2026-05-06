@@ -73,3 +73,4 @@ cilium hubble disable
 ```
 
 If `cilium status` shows Relay not ready, wait for the `hubble-relay` pod in `kube-system` before port-forwarding.
+-

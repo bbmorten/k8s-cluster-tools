@@ -102,6 +102,11 @@ for ip in 192.168.48.31 192.168.48.32 192.168.48.33 192.168.48.34; do
   curl -s http://${ip}:30090/ | grep '<h1>'
 done
 ```
+```shell
+for ip in 192.168.48.31 192.168.48.32 192.168.48.33 192.168.48.34; do
+  curl -s http://${ip}:30090/ 
+done
+```
 
 Default `externalTrafficPolicy: Cluster` means traffic hitting node N may be forwarded to a pod on node M (extra hop, source IP SNATed). Switch to `Local` to preserve client IP at the cost of dropping traffic on nodes without a backend pod — see the comment block in [manifests/30-nodeport-service.yaml](manifests/30-nodeport-service.yaml).
 

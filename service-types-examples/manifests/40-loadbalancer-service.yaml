@@ -40,5 +40,6 @@ spec:
   ports:
     - name: http
       port: 80          # the EXTERNAL port clients connect to
+      # nodePort: 30090   # the port on each node
       targetPort: http  # pod port
       protocol: TCP
