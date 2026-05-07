@@ -1,0 +1,183 @@
+# Pre-baked Keycloak realm configuration, imported on first start
+# (--import-realm flag in the Keycloak Deployment).
+#
+# This realm defines:
+#   1. Realm "k8s"
+#   2. User federation provider pointing at the in-cluster OpenLDAP, with:
+#      - users imported from ou=people,dc=example,dc=org
+#      - groups imported from ou=groups,dc=example,dc=org
+#      - a "groups" mapper that puts group names into the OIDC token's groups claim
+#   3. Confidential client "kubernetes" used by kubelogin (with PKCE)
+#   4. Protocol mappers so the ID token includes preferred_username + groups
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm-import
+  namespace: identity
+data:
+  k8s-realm.json: |
+    {
+      "realm": "k8s",
+      "enabled": true,
+      "displayName": "Kubernetes",
+      "sslRequired": "none",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": false,
+      "editUsernameAllowed": false,
+      "bruteForceProtected": true,
+      "accessTokenLifespan": 900,
+      "ssoSessionIdleTimeout": 1800,
+      "ssoSessionMaxLifespan": 36000,
+
+      "clients": [
+        {
+          "clientId": "kubernetes",
+          "name": "Kubernetes (kubelogin)",
+          "enabled": true,
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "secret": "kubernetes-client-secret",
+          "redirectUris": [
+            "http://localhost:8000",
+            "http://localhost:18000",
+            "http://127.0.0.1:8000",
+            "http://127.0.0.1:18000"
+          ],
+          "webOrigins": ["+"],
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "fullScopeAllowed": true,
+          "attributes": {
+            "pkce.code.challenge.method": "S256",
+            "use.refresh.tokens": "true",
+            "access.token.lifespan": "900"
+          },
+          "defaultClientScopes": [
+            "web-origins", "profile", "roles", "email", "groups"
+          ],
+          "optionalClientScopes": ["address", "phone", "offline_access"]
+        }
+      ],
+
+      "clientScopes": [
+        {
+          "name": "groups",
+          "description": "OpenID Connect scope that adds group membership to the ID token",
+          "protocol": "openid-connect",
+          "attributes": {
+            "include.in.token.scope": "true",
+            "display.on.consent.screen": "false"
+          },
+          "protocolMappers": [
+            {
+              "name": "groups",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-group-membership-mapper",
+              "consentRequired": false,
+              "config": {
+                "full.path": "false",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "groups",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
+
+      "components": {
+        "org.keycloak.storage.UserStorageProvider": [
+          {
+            "name": "openldap",
+            "providerId": "ldap",
+            "subComponents": {
+              "org.keycloak.storage.ldap.mappers.LDAPStorageMapper": [
+                {
+                  "name": "username",
+                  "providerId": "user-attribute-ldap-mapper",
+                  "config": {
+                    "ldap.attribute": ["uid"],
+                    "user.model.attribute": ["username"],
+                    "is.mandatory.in.ldap": ["true"],
+                    "read.only": ["true"]
+                  }
+                },
+                {
+                  "name": "first name",
+                  "providerId": "user-attribute-ldap-mapper",
+                  "config": {
+                    "ldap.attribute": ["givenName"],
+                    "user.model.attribute": ["firstName"],
+                    "read.only": ["true"]
+                  }
+                },
+                {
+                  "name": "last name",
+                  "providerId": "user-attribute-ldap-mapper",
+                  "config": {
+                    "ldap.attribute": ["sn"],
+                    "user.model.attribute": ["lastName"],
+                    "read.only": ["true"]
+                  }
+                },
+                {
+                  "name": "email",
+                  "providerId": "user-attribute-ldap-mapper",
+                  "config": {
+                    "ldap.attribute": ["mail"],
+                    "user.model.attribute": ["email"],
+                    "read.only": ["true"]
+                  }
+                },
+                {
+                  "name": "groups",
+                  "providerId": "group-ldap-mapper",
+                  "config": {
+                    "groups.dn": ["ou=groups,dc=example,dc=org"],
+                    "group.name.ldap.attribute": ["cn"],
+                    "group.object.classes": ["groupOfNames"],
+                    "membership.ldap.attribute": ["member"],
+                    "membership.attribute.type": ["DN"],
+                    "membership.user.ldap.attribute": ["uid"],
+                    "preserve.group.inheritance": ["false"],
+                    "ignore.missing.groups": ["false"],
+                    "user.roles.retrieve.strategy": ["LOAD_GROUPS_BY_MEMBER_ATTRIBUTE"],
+                    "mode": ["READ_ONLY"],
+                    "memberof.ldap.attribute": ["memberOf"],
+                    "groups.ldap.filter": [""],
+                    "drop.non.existing.groups.during.sync": ["false"]
+                  }
+                }
+              ]
+            },
+            "config": {
+              "enabled": ["true"],
+              "priority": ["0"],
+              "vendor": ["other"],
+              "editMode": ["READ_ONLY"],
+              "syncRegistrations": ["false"],
+              "importEnabled": ["true"],
+              "connectionUrl": ["ldap://openldap.identity.svc.cluster.local:389"],
+              "usersDn": ["ou=people,dc=example,dc=org"],
+              "rdnLDAPAttribute": ["uid"],
+              "uuidLDAPAttribute": ["entryUUID"],
+              "userObjectClasses": ["inetOrgPerson, organizationalPerson"],
+              "usernameLDAPAttribute": ["uid"],
+              "bindDn": ["cn=admin,dc=example,dc=org"],
+              "bindCredential": ["adminpassword"],
+              "searchScope": ["1"],
+              "useTruststoreSpi": ["always"],
+              "connectionPooling": ["true"],
+              "pagination": ["true"],
+              "authType": ["simple"]
+            }
+          }
+        ]
+      }
+    }

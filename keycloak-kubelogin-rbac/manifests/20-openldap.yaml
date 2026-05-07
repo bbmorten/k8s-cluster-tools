@@ -1,0 +1,215 @@
+# OpenLDAP — bitnami/openldap, declaratively bootstrapped via LDIF.
+#
+# Domain: dc=example,dc=org
+# Admin DN: cn=admin,dc=example,dc=org / Bind password: adminpassword
+#
+# Seeded users:
+#   alice   → member of k8s-admins   → cluster-admin
+#   bob     → member of k8s-viewers  → read-only
+#   carol   → no k8s group           → authenticates but every API call returns Forbidden
+#
+# The bitnami image runs every *.ldif found in /ldifs/ at first start.
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openldap-credentials
+  namespace: identity
+type: Opaque
+stringData:
+  LDAP_ADMIN_PASSWORD: adminpassword
+  LDAP_CONFIG_ADMIN_PASSWORD: configpassword
+  ALICE_PASSWORD: alicepass
+  BOB_PASSWORD: bobpass
+  CAROL_PASSWORD: carolpass
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openldap-bootstrap-ldif
+  namespace: identity
+data:
+  01-org-units.ldif: |
+    dn: ou=people,dc=example,dc=org
+    objectClass: organizationalUnit
+    ou: people
+
+    dn: ou=groups,dc=example,dc=org
+    objectClass: organizationalUnit
+    ou: groups
+
+  02-users.ldif: |
+    dn: uid=alice,ou=people,dc=example,dc=org
+    objectClass: inetOrgPerson
+    objectClass: posixAccount
+    objectClass: shadowAccount
+    uid: alice
+    cn: Alice Anderson
+    sn: Anderson
+    givenName: Alice
+    mail: alice@example.org
+    uidNumber: 10001
+    gidNumber: 10001
+    homeDirectory: /home/alice
+    loginShell: /bin/bash
+    userPassword: alicepass
+
+    dn: uid=bob,ou=people,dc=example,dc=org
+    objectClass: inetOrgPerson
+    objectClass: posixAccount
+    objectClass: shadowAccount
+    uid: bob
+    cn: Bob Brown
+    sn: Brown
+    givenName: Bob
+    mail: bob@example.org
+    uidNumber: 10002
+    gidNumber: 10002
+    homeDirectory: /home/bob
+    loginShell: /bin/bash
+    userPassword: bobpass
+
+    dn: uid=carol,ou=people,dc=example,dc=org
+    objectClass: inetOrgPerson
+    objectClass: posixAccount
+    objectClass: shadowAccount
+    uid: carol
+    cn: Carol Carter
+    sn: Carter
+    givenName: Carol
+    mail: carol@example.org
+    uidNumber: 10003
+    gidNumber: 10003
+    homeDirectory: /home/carol
+    loginShell: /bin/bash
+    userPassword: carolpass
+
+  03-groups.ldif: |
+    # groupOfNames (member: <DN>) is what Keycloak's LDAP federation
+    # expects by default. AD uses 'group' instead — see docs in README.
+
+    dn: cn=k8s-admins,ou=groups,dc=example,dc=org
+    objectClass: groupOfNames
+    cn: k8s-admins
+    description: Cluster administrators
+    member: uid=alice,ou=people,dc=example,dc=org
+
+    dn: cn=k8s-viewers,ou=groups,dc=example,dc=org
+    objectClass: groupOfNames
+    cn: k8s-viewers
+    description: Read-only across all namespaces
+    member: uid=bob,ou=people,dc=example,dc=org
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openldap
+  namespace: identity
+  labels:
+    app.kubernetes.io/name: openldap
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: openldap
+  ports:
+    - name: ldap
+      port: 389
+      targetPort: 1389
+    - name: ldaps
+      port: 636
+      targetPort: 1636
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openldap
+  namespace: identity
+  labels:
+    app.kubernetes.io/name: openldap
+    app.kubernetes.io/component: directory
+spec:
+  serviceName: openldap
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openldap
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openldap
+        app.kubernetes.io/component: directory
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+        - name: openldap
+          image: bitnami/openldap:2.6.10
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: ldap
+              containerPort: 1389
+            - name: ldaps
+              containerPort: 1636
+          env:
+            - name: LDAP_ROOT
+              value: dc=example,dc=org
+            - name: LDAP_ADMIN_USERNAME
+              value: admin
+            - name: LDAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: openldap-credentials
+                  key: LDAP_ADMIN_PASSWORD
+            - name: LDAP_CONFIG_ADMIN_ENABLED
+              value: "yes"
+            - name: LDAP_CONFIG_ADMIN_USERNAME
+              value: admin
+            - name: LDAP_CONFIG_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: openldap-credentials
+                  key: LDAP_CONFIG_ADMIN_PASSWORD
+            - name: LDAP_CUSTOM_LDIF_DIR
+              value: /ldifs
+            - name: LDAP_SKIP_DEFAULT_TREE
+              value: "yes"
+          volumeMounts:
+            - name: ldifs
+              mountPath: /ldifs
+              readOnly: true
+            - name: data
+              mountPath: /bitnami/openldap
+          readinessProbe:
+            tcpSocket:
+              port: ldap
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: ldap
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: ldifs
+          configMap:
+            name: openldap-bootstrap-ldif
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi

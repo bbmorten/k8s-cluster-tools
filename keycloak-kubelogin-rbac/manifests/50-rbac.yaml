@@ -1,0 +1,53 @@
+# RBAC — maps OIDC groups (originating from LDAP) to Kubernetes permissions.
+#
+# How this works:
+#  1. User logs in to Keycloak with their LDAP credentials.
+#  2. Keycloak issues an ID token containing groups: ["k8s-admins", ...] via
+#     the group-ldap-mapper + oidc-group-membership-mapper.
+#  3. kubectl sends that token as a Bearer to the API server.
+#  4. The API server validates the token and extracts:
+#       - username = "<oidc-username-prefix>" + token.preferred_username
+#       - groups   = each entry in token.groups, prefixed with "<oidc-groups-prefix>"
+#  5. RBAC binds the prefixed group names to roles.
+#
+# IMPORTANT: the "oidc:" prefixes here MUST match --oidc-username-prefix and
+# --oidc-groups-prefix in the kube-apiserver static pod manifest.
+
+---
+# Cluster-admin for the k8s-admins LDAP group (alice).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oidc-k8s-admins
+  labels:
+    app.kubernetes.io/managed-by: keycloak-kubelogin-rbac
+subjects:
+  - kind: Group
+    name: oidc:k8s-admins
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Read-only across all namespaces for the k8s-viewers LDAP group (bob).
+# The built-in `view` ClusterRole can get/list/watch most resources but
+# cannot read Secrets and cannot mutate anything.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oidc-k8s-viewers
+  labels:
+    app.kubernetes.io/managed-by: keycloak-kubelogin-rbac
+subjects:
+  - kind: Group
+    name: oidc:k8s-viewers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+
+# carol gets nothing — she will authenticate but every API call returns Forbidden.
+# That is the correct default: deny by absence of a binding.

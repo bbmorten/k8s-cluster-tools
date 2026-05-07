@@ -1,0 +1,91 @@
+# Postgres for Keycloak. Single-replica StatefulSet with a 2Gi PVC.
+# Keycloak 26 supports an embedded H2 DB but its restart behaviour is flaky
+# enough that running real Postgres is worth it even for a teaching lab.
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-db-credentials
+  namespace: identity
+type: Opaque
+stringData:
+  POSTGRES_DB: keycloak
+  POSTGRES_USER: keycloak
+  POSTGRES_PASSWORD: keycloakpass
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-db
+  namespace: identity
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: keycloak-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak-db
+  namespace: identity
+  labels:
+    app.kubernetes.io/name: keycloak-db
+    app.kubernetes.io/component: database
+spec:
+  serviceName: keycloak-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak-db
+        app.kubernetes.io/component: database
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
+          envFrom:
+            - secretRef:
+                name: keycloak-db-credentials
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              # Postgres image insists on a subdirectory: lost+found on some
+              # volumes makes initdb refuse to run otherwise.
+              subPath: pgdata
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, keycloak, -d, keycloak]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: [pg_isready, -U, keycloak, -d, keycloak]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 2Gi
