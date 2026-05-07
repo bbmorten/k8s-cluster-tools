@@ -15,7 +15,14 @@ set -uo pipefail
 CONTROL_PLANE_HOST="${CONTROL_PLANE_HOST:-192.168.48.31}"
 CONTROL_PLANE_USER="${CONTROL_PLANE_USER:-vm}"
 SSH_KEY="${SSH_KEY:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/../k8s-setup-w-cilium/inventory/node-ssh-key}"
-INGRESS_LB_IP="${INGRESS_LB_IP:-192.168.48.202}"
+
+# Resolve INGRESS_LB_IP: env override → existing controller's EXTERNAL-IP →
+# fallback default. Adopting the existing IP keeps us out of conflict with
+# ../ingress-nginx-w-certificate/, which pins the same Service to .201.
+DEFAULT_LB_IP="192.168.48.202"
+existing_lb_ip="$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+INGRESS_LB_IP="${INGRESS_LB_IP:-${existing_lb_ip:-$DEFAULT_LB_IP}}"
 
 fail=0
 warn() { printf '\033[33mWARN:\033[0m %s\n' "$*"; }
@@ -55,17 +62,44 @@ else
   fi
 fi
 
-# 4. kubelogin on workstation
+# 4. kubelogin on workstation. Two unrelated tools share the binary name:
+#    - int128/kubelogin (the OIDC one — what this lab needs)
+#    - Azure kubelogin (for AKS / AAD; not OIDC-generic)
+# `snap install kubelogin` often pulls the Azure variant. We check the help
+# text to disambiguate, and accept either the standalone int128 binary
+# OR the krew plugin (`kubectl oidc-login`).
+kubelogin_ok=0
 if command -v kubelogin >/dev/null; then
-  ok "kubelogin found: $(command -v kubelogin)"
-elif kubectl plugin list 2>/dev/null | grep -q oidc_login; then
-  ok "kubectl plugin oidc-login found"
+  # Same pipeline-free pattern as 06-configure-kubeconfig.sh — avoids
+  # set -u / pipefail interactions in the calling shell.
+  kubelogin_help_out="$(kubelogin --help 2>&1 || true)"
+  kubelogin_help_lower="${kubelogin_help_out,,}"
+  if [[ "$kubelogin_help_lower" == *"azure active directory"* ]]; then
+    warn "kubelogin at $(command -v kubelogin) is Microsoft's Azure variant, not int128/kubelogin"
+    warn "  → fix with:  kubectl krew install oidc-login   (or remove the snap and install int128/kubelogin)"
+  else
+    ok "int128/kubelogin found: $(command -v kubelogin)"
+    kubelogin_ok=1
+  fi
+fi
+if [ "$kubelogin_ok" = "0" ]; then
+  if kubectl plugin list 2>/dev/null | grep -q oidc_login; then
+    ok "kubectl plugin oidc-login found (krew)"
+  else
+    warn "int128/kubelogin not found — install with one of:"
+    warn "    kubectl krew install oidc-login           # via krew (recommended)"
+    warn "    go install github.com/int128/kubelogin/cmd/kubelogin@latest"
+    warn "  Step 06 will write a kubeconfig that calls kubelogin; auth fails until it's installed."
+  fi
+fi
+
+# 4b. openssl on workstation — needed by create-keycloak-tls.sh (step 03).
+# K8s >= 1.30 requires --oidc-issuer-url to be https://, so the lab must
+# generate a self-signed CA + server cert before deploying Keycloak.
+if command -v openssl >/dev/null; then
+  ok "openssl found: $(command -v openssl)"
 else
-  warn "kubelogin not found — install with one of:"
-  warn "    sudo apt install kubelogin                # if available in your apt sources"
-  warn "    kubectl krew install oidc-login           # via krew"
-  warn "    go install github.com/int128/kubelogin/cmd/kubelogin@latest"
-  warn "  Step 06 will write a kubeconfig that calls kubelogin; auth will fail until it's installed."
+  err "openssl not on PATH — needed by create-keycloak-tls.sh to generate the TLS cert"
 fi
 
 # 5. Hostname resolution check (informational)

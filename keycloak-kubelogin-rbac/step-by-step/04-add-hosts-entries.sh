@@ -11,7 +11,13 @@
 
 set -euo pipefail
 
-INGRESS_LB_IP="${INGRESS_LB_IP:-192.168.48.202}"
+# Resolve INGRESS_LB_IP: env override → existing controller's EXTERNAL-IP →
+# fallback default. Adopting the existing IP keeps us out of conflict with
+# ../ingress-nginx-w-certificate/, which pins the same Service to .201.
+DEFAULT_LB_IP="192.168.48.202"
+existing_lb_ip="$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+INGRESS_LB_IP="${INGRESS_LB_IP:-${existing_lb_ip:-$DEFAULT_LB_IP}}"
 HOSTS_FILE="${HOSTS_FILE:-/etc/hosts}"
 MARKER_BEGIN="# >>> keycloak-kubelogin-rbac lab (managed) >>>"
 MARKER_END="# <<< keycloak-kubelogin-rbac lab (managed) <<<"
@@ -51,13 +57,26 @@ else
 fi
 
 # Probe the actual ingress while we're here.
-if curl -fsS --max-time 5 http://keycloak.k8s.lab/realms/k8s/.well-known/openid-configuration \
+# Pass the lab CA via --cacert so this is a real TLS verification check, not
+# a `-k` shortcut. CERT_DIR is the cache dir where create-keycloak-tls.sh
+# stashes ca.crt; default ${HOME}/.keycloak-lab.
+CA_CRT="${CERT_DIR:-${HOME}/.keycloak-lab}/ca.crt"
+if [ -s "$CA_CRT" ]; then
+  curl_ca_args=(--cacert "$CA_CRT")
+else
+  echo "  (no CA cert at $CA_CRT — falling back to --insecure for the probe only)"
+  curl_ca_args=(--insecure)
+fi
+
+if curl -fsS "${curl_ca_args[@]}" --max-time 5 \
+     https://keycloak.k8s.lab/realms/k8s/.well-known/openid-configuration \
      >/dev/null 2>&1; then
   echo "OIDC discovery reachable from this workstation. ✓"
 else
-  echo "WARNING: cannot reach http://keycloak.k8s.lab/realms/k8s/.well-known/openid-configuration"
+  echo "WARNING: cannot reach https://keycloak.k8s.lab/realms/k8s/.well-known/openid-configuration"
   echo "  - Is Keycloak ready?     kubectl get pod -n identity"
-  echo "  - Is ingress reachable?  curl -v http://${INGRESS_LB_IP}/"
+  echo "  - Is ingress reachable?  curl -vk https://${INGRESS_LB_IP}/"
+  echo "  - Was the cert created?  ls -l $CA_CRT  (run 03-deploy-keycloak.sh first)"
 fi
 
 echo

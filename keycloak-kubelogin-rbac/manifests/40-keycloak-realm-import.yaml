@@ -57,10 +57,24 @@ data:
             "use.refresh.tokens": "true",
             "access.token.lifespan": "900"
           },
-          "defaultClientScopes": [
-            "web-origins", "profile", "roles", "email", "groups"
-          ],
-          "optionalClientScopes": ["address", "phone", "offline_access"]
+          "defaultClientScopes": ["groups"],
+          "optionalClientScopes": [],
+          "protocolMappers": [
+            {
+              "name": "username",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-property-mapper",
+              "consentRequired": false,
+              "config": {
+                "userinfo.token.claim": "true",
+                "user.attribute": "username",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "preferred_username",
+                "jsonType.label": "String"
+              }
+            }
+          ]
         }
       ],
 

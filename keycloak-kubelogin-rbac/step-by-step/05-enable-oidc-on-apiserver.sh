@@ -7,13 +7,14 @@
 # Two changes are made:
 #
 #   1. Add --oidc-* flags to spec.containers[0].command:
-#        --oidc-issuer-url=http://keycloak.k8s.lab/realms/k8s
+#        --oidc-issuer-url=https://keycloak.k8s.lab/realms/k8s
 #        --oidc-client-id=kubernetes
 #        --oidc-username-claim=preferred_username
 #        --oidc-username-prefix=oidc:
 #        --oidc-groups-claim=groups
 #        --oidc-groups-prefix=oidc:
 #        --oidc-signing-algs=RS256
+#        --oidc-ca-file=/etc/kubernetes/pki/keycloak-ca.crt   (the lab CA)
 #
 #   2. Add a hostAlias under spec so the API server (which uses its own
 #      kubelet-managed /etc/hosts, not the host's) can resolve
@@ -34,12 +35,37 @@ set -euo pipefail
 CONTROL_PLANE_HOST="${CONTROL_PLANE_HOST:-192.168.48.31}"
 CONTROL_PLANE_USER="${CONTROL_PLANE_USER:-vm}"
 SSH_KEY="${SSH_KEY:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/../k8s-setup-w-cilium/inventory/node-ssh-key}"
-INGRESS_LB_IP="${INGRESS_LB_IP:-192.168.48.202}"
+
+# Resolve INGRESS_LB_IP: env override → existing controller's EXTERNAL-IP →
+# fallback default. Adopting the existing IP keeps us out of conflict with
+# ../ingress-nginx-w-certificate/, which pins the same Service to .201.
+DEFAULT_LB_IP="192.168.48.202"
+existing_lb_ip="$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+INGRESS_LB_IP="${INGRESS_LB_IP:-${existing_lb_ip:-$DEFAULT_LB_IP}}"
 KEYCLOAK_HOST="${KEYCLOAK_HOST:-keycloak.k8s.lab}"
-ISSUER="${ISSUER:-http://${KEYCLOAK_HOST}/realms/k8s}"
+# K8s >= 1.30 rejects http:// here ("URL scheme must be https"). Keep this
+# in lockstep with KC_HOSTNAME on the Keycloak Deployment — the API server
+# compares the JWT `iss` claim against this string byte-for-byte.
+ISSUER="${ISSUER:-https://${KEYCLOAK_HOST}/realms/k8s}"
+
+# CA cert (PEM) that signed Keycloak's server cert. Created locally by
+# create-keycloak-tls.sh; we SCP it to the control plane and reference it
+# from --oidc-ca-file. Path on the control-plane filesystem must live under
+# /etc/kubernetes/pki/, which kubeadm already mounts into the apiserver
+# static pod at the same path — so no static-pod volumeMount edit needed.
+CERT_DIR="${CERT_DIR:-${HOME}/.keycloak-lab}"
+LOCAL_CA_CRT="${CERT_DIR}/ca.crt"
+REMOTE_CA_CRT="${REMOTE_CA_CRT:-/etc/kubernetes/pki/keycloak-ca.crt}"
 
 if [ ! -f "$SSH_KEY" ]; then
   echo "ERROR: SSH key not found at $SSH_KEY (override with SSH_KEY=...)" >&2
+  exit 1
+fi
+
+if [ ! -s "$LOCAL_CA_CRT" ]; then
+  echo "ERROR: lab CA cert not found at $LOCAL_CA_CRT" >&2
+  echo "       Run 03-deploy-keycloak.sh first (or bash ../create-keycloak-tls.sh)." >&2
   exit 1
 fi
 
@@ -47,6 +73,14 @@ ssh_cp() {
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
     "${CONTROL_PLANE_USER}@${CONTROL_PLANE_HOST}" "$@"
 }
+
+echo "Distributing lab CA to control plane at ${REMOTE_CA_CRT}..."
+# Two-hop: scp into the user's home (only place we have write perms over
+# scp), then sudo-mv into /etc/kubernetes/pki and lock down ownership.
+TMP_REMOTE="/tmp/keycloak-ca-$$.crt"
+scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -q \
+  "$LOCAL_CA_CRT" "${CONTROL_PLANE_USER}@${CONTROL_PLANE_HOST}:${TMP_REMOTE}"
+ssh_cp "sudo install -o root -g root -m 0644 '${TMP_REMOTE}' '${REMOTE_CA_CRT}' && rm -f '${TMP_REMOTE}'"
 
 echo "Editing /etc/kubernetes/manifests/kube-apiserver.yaml on ${CONTROL_PLANE_HOST}..."
 
@@ -62,9 +96,16 @@ import os, sys, shutil
 from datetime import datetime
 
 PATH = '/etc/kubernetes/manifests/kube-apiserver.yaml'
+# Backups MUST live outside /etc/kubernetes/manifests/. kubelet's static-pod
+# watcher reads every file in that directory regardless of extension, so a
+# *.bak-* file gets parsed as a second kube-apiserver pod manifest with the
+# same name — and may "win" the race over the real one, leaving the cluster
+# silently running the pre-edit spec.
+BACKUP_DIR = '/etc/kubernetes/kube-apiserver-backups'
 INGRESS_IP    = "${INGRESS_LB_IP}"
 KEYCLOAK_HOST = "${KEYCLOAK_HOST}"
 ISSUER        = "${ISSUER}"
+OIDC_CA_FILE  = "${REMOTE_CA_CRT}"
 
 OIDC_FLAGS = [
     f'--oidc-issuer-url={ISSUER}',
@@ -74,12 +115,16 @@ OIDC_FLAGS = [
     '--oidc-groups-claim=groups',
     '--oidc-groups-prefix=oidc:',
     '--oidc-signing-algs=RS256',
+    # Path is inside /etc/kubernetes/pki, which kubeadm already mounts into
+    # the apiserver static pod at the same path. No volumeMount edit needed.
+    f'--oidc-ca-file={OIDC_CA_FILE}',
 ]
 
 with open(PATH) as f:
     lines = f.read().splitlines()
 
-backup = f'{PATH}.bak-{datetime.now().strftime("%Y%m%dT%H%M%S")}'
+os.makedirs(BACKUP_DIR, exist_ok=True)
+backup = f'{BACKUP_DIR}/kube-apiserver.yaml.bak-{datetime.now().strftime("%Y%m%dT%H%M%S")}'
 shutil.copy(PATH, backup)
 print(f'Backed up to {backup}', file=sys.stderr)
 

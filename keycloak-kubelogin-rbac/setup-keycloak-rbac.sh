@@ -53,7 +53,7 @@ A browser opens. Use one of:
 
 Useful URLs (need /etc/hosts → MetalLB ingress IP, done by step 04):
 
-  Keycloak admin:   http://keycloak.k8s.lab    (admin / admin)
+  Keycloak admin:   https://keycloak.k8s.lab   (admin / admin; cert is self-signed)
 
 To run the persona tests interactively:
 

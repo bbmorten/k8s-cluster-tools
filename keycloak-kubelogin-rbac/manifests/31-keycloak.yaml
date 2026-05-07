@@ -4,9 +4,17 @@
 # The K8s API server compares the JWT `iss` claim against this byte-for-byte,
 # so it MUST match the --oidc-issuer-url value you set on the API server.
 #
-# Default in this lab: http://keycloak.k8s.lab — resolved via /etc/hosts on
+# Default in this lab: https://keycloak.k8s.lab — resolved via /etc/hosts on
 # your workstation AND via hostAliases on the kube-apiserver static pod, so
 # both the browser and the API server hit the same MetalLB ingress IP.
+#
+# Why HTTPS (not HTTP): Kubernetes >= 1.30 rejects http:// in
+# --oidc-issuer-url with "URL scheme must be https". The lab issues a
+# self-signed CA + server cert via create-keycloak-tls.sh and lands the
+# server cert in Secret `keycloak-tls` (referenced from the Ingress' tls:
+# block below). Keycloak itself still listens on plain HTTP (port 8080) —
+# ingress-nginx terminates TLS at the edge, sets X-Forwarded-Proto, and
+# Keycloak's KC_PROXY_HEADERS=xforwarded makes the issuer URL https.
 
 ---
 apiVersion: v1
@@ -78,7 +86,7 @@ spec:
                   name: keycloak-db-credentials
                   key: POSTGRES_PASSWORD
             - name: KC_HOSTNAME
-              value: http://keycloak.k8s.lab
+              value: https://keycloak.k8s.lab
             - name: KC_HOSTNAME_STRICT
               value: "false"
             - name: KC_HTTP_ENABLED
@@ -138,8 +146,16 @@ metadata:
   namespace: identity
   annotations:
     nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+    # Force HTTP -> HTTPS redirect so the kube-apiserver (and any browser)
+    # never get to the plain endpoint.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - keycloak.k8s.lab
+      # Server cert + key applied by create-keycloak-tls.sh.
+      secretName: keycloak-tls
   rules:
     - host: keycloak.k8s.lab
       http:

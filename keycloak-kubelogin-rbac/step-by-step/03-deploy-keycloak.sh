@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # 03-deploy-keycloak.sh — deploy Postgres + Keycloak (with realm import) and
-# verify the OIDC discovery endpoint is reachable.
+# verify the OIDC discovery endpoint is reachable over HTTPS.
 #
-# After this step, Keycloak's admin UI is at http://keycloak.k8s.lab (admin/admin)
-# but it's only reachable from a workstation that has /etc/hosts pointing
-# keycloak.k8s.lab at the ingress IP. Step 04 takes care of that.
+# After this step, Keycloak's admin UI is at https://keycloak.k8s.lab
+# (admin/admin) but it's only reachable from a workstation that has
+# /etc/hosts pointing keycloak.k8s.lab at the ingress IP. Step 04 takes
+# care of that.
+#
+# Why we generate a cert here: K8s >= 1.30 requires --oidc-issuer-url to be
+# https://, so the keycloak Ingress needs a real TLS Secret before it
+# starts handing back valid OIDC discovery documents. create-keycloak-tls.sh
+# emits a CA + server cert pair; the server cert goes into the in-cluster
+# Secret, the CA goes to /etc/kubernetes/pki on the control plane in step 05.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+echo "==> Generating self-signed cert for keycloak.k8s.lab (idempotent)"
+bash "$ROOT/create-keycloak-tls.sh"
 
 kubectl apply -f "$ROOT/manifests/30-keycloak-db.yaml"
 
@@ -25,16 +35,23 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=keycloak \
 
 echo
 echo "Probing OIDC discovery from inside the cluster (this is what the API server will do)..."
+# Use --resolve instead of "Host:" because the ingress matches SNI from the
+# TLS handshake, not the Host header — passing `-H "Host: ..."` to a TLS
+# endpoint means SNI sees the Service hostname, the ingress falls back to
+# the default backend cert, and curl rejects the result. --resolve forces
+# the right SNI without touching DNS.
+INGRESS_CIP="$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.clusterIP}')"
 kubectl run -n identity --rm -i --restart=Never oidc-probe --image=curlimages/curl:8.10.1 -- \
-  curl -fsS --max-time 5 -H "Host: keycloak.k8s.lab" \
-    http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/realms/k8s/.well-known/openid-configuration \
+  curl -fsSk --max-time 5 \
+    --resolve "keycloak.k8s.lab:443:${INGRESS_CIP}" \
+    https://keycloak.k8s.lab/realms/k8s/.well-known/openid-configuration \
   | head -c 200 || true
 echo
 echo
 
 echo "Keycloak is up."
 echo "  Realm:      k8s"
-echo "  Admin UI:   http://keycloak.k8s.lab          (admin / admin)"
-echo "  Issuer URL: http://keycloak.k8s.lab/realms/k8s"
+echo "  Admin UI:   https://keycloak.k8s.lab        (admin / admin)"
+echo "  Issuer URL: https://keycloak.k8s.lab/realms/k8s"
 echo
 echo "Next: 04-add-hosts-entries.sh  (so your workstation + browser can resolve keycloak.k8s.lab)"

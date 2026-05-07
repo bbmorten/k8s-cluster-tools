@@ -82,10 +82,17 @@ import os, sys, shutil
 from datetime import datetime
 
 PATH = '/etc/kubernetes/manifests/kube-apiserver.yaml'
+# Backups MUST live outside /etc/kubernetes/manifests/. kubelet's static-pod
+# watcher reads every file in that directory regardless of extension, so a
+# *.bak-* file gets parsed as a second kube-apiserver pod manifest with the
+# same name and may "win" the race over the real one.
+BACKUP_DIR = '/etc/kubernetes/kube-apiserver-backups'
+
 with open(PATH) as f:
     lines = f.read().splitlines()
 
-backup = f'{PATH}.bak-{datetime.now().strftime("%Y%m%dT%H%M%S")}'
+os.makedirs(BACKUP_DIR, exist_ok=True)
+backup = f'{BACKUP_DIR}/kube-apiserver.yaml.bak-{datetime.now().strftime("%Y%m%dT%H%M%S")}'
 shutil.copy(PATH, backup)
 print(f'Backup: {backup}', file=sys.stderr)
 
@@ -131,6 +138,15 @@ PYEOF
       fi
       sleep 3
     done
+
+    # Remove the lab CA cert that step 05 dropped under /etc/kubernetes/pki/.
+    # Safe to run unconditionally: file may already be absent (e.g. install
+    # never reached step 05).
+    REMOTE_CA_CRT="${REMOTE_CA_CRT:-/etc/kubernetes/pki/keycloak-ca.crt}"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
+      "${CONTROL_PLANE_USER}@${CONTROL_PLANE_HOST}" \
+      "sudo rm -f '${REMOTE_CA_CRT}'" || true
+    echo "Removed ${REMOTE_CA_CRT} on control plane (if present)."
   fi
 fi
 
@@ -150,6 +166,19 @@ step "kubelogin token cache"
 rm -rf "${HOME}/.kube/cache/oidc-login" 2>/dev/null || true
 echo "Cleared ~/.kube/cache/oidc-login"
 
+step "lab CA + server cert (workstation)"
+# Idempotent: silent if already gone. Set REMOVE_LAB_CERTS=0 to keep the
+# cert/key files (e.g. if you plan to re-run setup right away — keeps the
+# CA stable so the kube-apiserver's hostAliases don't need rewiring).
+REMOVE_LAB_CERTS="${REMOVE_LAB_CERTS:-1}"
+CERT_DIR="${CERT_DIR:-${HOME}/.keycloak-lab}"
+if [ "$REMOVE_LAB_CERTS" = "1" ]; then
+  rm -rf "$CERT_DIR" 2>/dev/null || true
+  echo "Removed ${CERT_DIR}"
+else
+  echo "Kept ${CERT_DIR} (REMOVE_LAB_CERTS=0)"
+fi
+
 cat <<'EOF'
 
 Teardown complete.
@@ -157,5 +186,5 @@ Teardown complete.
 Left behind on purpose:
   - MetalLB              (shared with other labs — see ../metallb-installation/)
   - ingress-nginx        (set REMOVE_INGRESS_NGINX=1 to delete it next time)
-  - any timestamped kube-apiserver.yaml.bak-* on the control plane
+  - any timestamped kube-apiserver.yaml.bak-* in /etc/kubernetes/kube-apiserver-backups/
 EOF

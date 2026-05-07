@@ -32,6 +32,17 @@ metadata:
   namespace: identity
 data:
   01-org-units.ldif: |
+    # The base entry must come first. With LDAP_SKIP_DEFAULT_TREE=yes,
+    # the Bitnami image does NOT create dc=example,dc=org for us, so any
+    # subsequent ou=*/uid=* entries would be rejected as "parent doesn't
+    # exist" and the directory would silently end up empty.
+    dn: dc=example,dc=org
+    objectClass: top
+    objectClass: dcObject
+    objectClass: organization
+    o: Example Org
+    dc: example
+
     dn: ou=people,dc=example,dc=org
     objectClass: organizationalUnit
     ou: people
@@ -149,7 +160,10 @@ spec:
         fsGroup: 1001
       containers:
         - name: openldap
-          image: bitnami/openldap:2.6.10
+          # Bitnami deprecated their public Docker Hub images on 2025-08-28
+          # and moved older tags to the `bitnamilegacy` namespace. See
+          # https://github.com/bitnami/charts/issues/35164 for context.
+          image: bitnamilegacy/openldap:2.6.10
           imagePullPolicy: IfNotPresent
           ports:
             - name: ldap
