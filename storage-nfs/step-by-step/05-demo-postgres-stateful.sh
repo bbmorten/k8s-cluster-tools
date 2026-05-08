@@ -31,6 +31,23 @@ step "showing the bound PVC + PV"
 kubectl -n "${NS}" get pvc -l app=postgres
 kubectl get pv -o wide | awk 'NR==1 || /nfs-demo-postgres/'
 
+# Belt-and-suspenders against the docker-entrypoint init-restart race:
+# the readinessProbe in the manifest forces a TCP probe so this should
+# already pass on the first try, but a brief poll here means an old/stale
+# manifest (or a different postgres image) still recovers gracefully.
+step "verifying the demo DB is reachable (poll, up to 60s)"
+deadline=$(( $(date +%s) + 60 ))
+until kubectl -n "${NS}" exec -i postgres-0 -- \
+        env PGPASSWORD=demopass psql -U demo -d demo -tAc 'SELECT 1' >/dev/null 2>&1; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "ERROR: demo DB never became reachable. Logs:"
+    kubectl -n "${NS}" logs postgres-0 --tail=40
+    exit 1
+  fi
+  sleep 2
+done
+echo "✓ demo DB reachable"
+
 step "creating table + inserting a row"
 kubectl -n "${NS}" exec -i postgres-0 -- \
   env PGPASSWORD=demopass psql -U demo -d demo -v ON_ERROR_STOP=1 <<'SQL'

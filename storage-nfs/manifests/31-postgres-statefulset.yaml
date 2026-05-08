@@ -76,14 +76,29 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+          # readinessProbe goes through TCP on purpose. The postgres image's
+          # docker-entrypoint.sh starts postgres TWICE on first boot: once
+          # listening on the Unix socket only to run initdb + CREATE DATABASE,
+          # then a fast shutdown, then the real TCP listener. A bare
+          # `pg_isready` defaults to the Unix socket and would mark the pod
+          # Ready during the init pause — *before* the demo DB exists. Forcing
+          # the probe through `-h localhost` (TCP) means it only succeeds
+          # after the final restart, which is exactly when CREATE DATABASE
+          # has run and the DB is reachable from psql.
           readinessProbe:
             exec:
-              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+              command:
+                - sh
+                - -c
+                - "pg_isready -h localhost -p 5432 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+              command:
+                - sh
+                - -c
+                - "pg_isready -h localhost -p 5432 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""
             initialDelaySeconds: 30
             periodSeconds: 15
   volumeClaimTemplates:
