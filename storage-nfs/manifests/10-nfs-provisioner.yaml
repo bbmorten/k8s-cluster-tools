@@ -15,6 +15,9 @@ metadata:
   name: nfs-provisioner-runner
 rules:
   - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
@@ -84,7 +87,7 @@ spec:
       serviceAccountName: nfs-provisioner
       containers:
         - name: nfs-client-provisioner
-          image: registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2
+          image: registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.18
           volumeMounts:
             - name: nfs-client-root
               mountPath: /persistentvolumes
@@ -92,22 +95,26 @@ spec:
             - name: PROVISIONER_NAME
               value: k8s-sigs.io/nfs-subdir-external-provisioner
             - name: NFS_SERVER
-              value: 192.168.48.19
+              value: __NFS_SERVER__
             - name: NFS_PATH
-              value: /exports/data
+              value: __NFS_PATH__
       volumes:
         - name: nfs-client-root
           nfs:
-            server: 192.168.48.19
-            path: /exports/data
+            server: __NFS_SERVER__
+            path: __NFS_PATH__
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: nfs-client
   annotations:
-    storageclass.kubernetes.io/is-default-class: "true"
+    # NOT default on purpose: coexist with rancher local-path. Students must
+    # set storageClassName: nfs-client explicitly to opt into NFS.
+    storageclass.kubernetes.io/is-default-class: "false"
 provisioner: k8s-sigs.io/nfs-subdir-external-provisioner
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
 parameters:
   archiveOnDelete: "false"
   pathPattern: "${.PVC.namespace}-${.PVC.name}"

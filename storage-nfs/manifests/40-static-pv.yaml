@@ -1,0 +1,78 @@
+# "Static" PV/PVC pair — the dynamic-provisioner-free way to mount NFS.
+#
+# The cluster admin pre-creates the PV; the developer's PVC binds to it via
+# `volumeName`. The subdirectory /exports/data/static-vol must exist on the
+# NFS server before this is applied (step 01-install-nfs-server.sh creates it).
+#
+# Use case: external NFS appliance you don't want a provisioner to write
+# subdirectories into. You'll size and lifecycle each PV by hand.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nfs-demo-static
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv-static
+  labels:
+    demo: storage-nfs-static
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""    # explicitly empty: do NOT involve the default SC
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+  nfs:
+    server: __NFS_SERVER__
+    path: __NFS_PATH__/static-vol
+  # Pre-bind the PV to a specific PVC so no other PVC can grab it.
+  claimRef:
+    namespace: nfs-demo-static
+    name: nfs-pvc-static
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-pvc-static
+  namespace: nfs-demo-static
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: nfs-pv-static
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: static-pv-writer
+  namespace: nfs-demo-static
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          echo "[static-pv-writer] $(date -u +%FT%TZ) hello from $(hostname)" >> /mnt/log.txt
+          echo "[static-pv-writer] tail of /mnt/log.txt:"
+          tail -n 5 /mnt/log.txt
+          sleep 5
+      volumeMounts:
+        - name: data
+          mountPath: /mnt
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: nfs-pvc-static

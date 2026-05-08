@@ -1,0 +1,97 @@
+# PostgreSQL as a 1-replica StatefulSet, backed by an NFS-provisioned PVC.
+#
+# Demo flow:
+#   1. apply this manifest, wait for postgres-0 Ready
+#   2. kubectl exec ... psql -c "CREATE TABLE ...; INSERT INTO ..."
+#   3. kubectl delete pod postgres-0
+#   4. StatefulSet recreates postgres-0; the PVC is rebound to the same NFS
+#      subdir, so the data files survive
+#   5. SELECT returns the row → persistence proven
+#
+# About NFS for Postgres in production: don't. NFS file-locking and fsync
+# semantics historically caused data corruption. This lab uses NFS only as
+# a "shared block-ish backend students can reason about". For real Postgres
+# at scale, use block storage (Longhorn, Rook-Ceph RBD, cloud EBS, etc.).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: nfs-demo-postgres
+type: Opaque
+stringData:
+  POSTGRES_USER: demo
+  POSTGRES_PASSWORD: demopass
+  POSTGRES_DB: demo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: nfs-demo-postgres
+  labels:
+    app: postgres
+spec:
+  clusterIP: None    # headless, required for StatefulSet stable network IDs
+  selector:
+    app: postgres
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: nfs-demo-postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              name: pg
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+          env:
+            # Postgres refuses to init under a directory that contains a
+            # `lost+found` dir or that isn't owned by it. NFS subdir
+            # provisioner gives us an empty subdirectory, so PGDATA can
+            # point straight at the mount.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: nfs-client
+        resources:
+          requests:
+            storage: 2Gi

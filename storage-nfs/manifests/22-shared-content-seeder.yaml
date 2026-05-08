@@ -1,0 +1,51 @@
+# One-shot Job that mounts the RWX PVC read-write and writes the initial
+# website content. Once it exits, the nginx Deployment in 23- mounts the
+# same PVC read-only — proving "one writer, many readers" over NFS.
+#
+# Re-run by deleting the Job (it has TTL 600s after completion). Editing the
+# index.html later is shown as an exercise in the README, using a one-off
+# `kubectl debug`-style pod with RW access.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shared-content-seeder
+  namespace: nfs-demo-shared
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: seeder
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              echo "[seeder] writing initial content to /content"
+              mkdir -p /content
+              cat > /content/index.html <<HTML
+              <!doctype html>
+              <html><head><title>Shared NFS demo</title></head>
+              <body>
+                <h1>Hello from a shared NFS volume</h1>
+                <p>This file lives once on the NFS server and is mounted
+                   read-only by every nginx replica.</p>
+                <p>version: v1</p>
+                <p>seeded-at: $(date -u +%FT%TZ)</p>
+              </body></html>
+              HTML
+              cat > /content/version.txt <<TXT
+              v1
+              TXT
+              echo "[seeder] done; files:"
+              ls -l /content
+          volumeMounts:
+            - name: content
+              mountPath: /content
+      volumes:
+        - name: content
+          persistentVolumeClaim:
+            claimName: shared-content
