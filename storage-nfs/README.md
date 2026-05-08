@@ -54,7 +54,7 @@ Everything below is overridable via env var; see each script's header for the ex
 | NFS clients | `192.168.48.31`, `.32`, `.33` | Control plane + first two workers. |
 | Allowed CIDR | `192.168.48.0/24` | Goes into `/etc/exports`. |
 | StorageClass name | `nfs-client` | **Not** annotated as default — coexists with `local-path`. |
-| Provisioner image | `registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.18` | Pinned in [manifests/10-nfs-provisioner.yaml](manifests/10-nfs-provisioner.yaml). |
+| Provisioner image | `registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2` | Pinned in [manifests/10-nfs-provisioner.yaml](manifests/10-nfs-provisioner.yaml). The official `registry.k8s.io` mirror only ships `v4.0.0` / `v4.0.1` / `v4.0.2`; higher version numbers exist on community forks (Quay, ECR Public) but not here. |
 | Postgres image | `postgres:16-alpine` | Pinned in [manifests/31-postgres-statefulset.yaml](manifests/31-postgres-statefulset.yaml). |
 | nginx image | `nginx:1.27-alpine` | Pinned in [manifests/23-nginx-shared-deployment.yaml](manifests/23-nginx-shared-deployment.yaml). |
 
@@ -167,7 +167,7 @@ Everything is pinned inline; no shared variable. Bump in lockstep:
 
 | Component | File | Pin |
 |---|---|---|
-| nfs-subdir-external-provisioner | [manifests/10-nfs-provisioner.yaml](manifests/10-nfs-provisioner.yaml) | `v4.0.18` |
+| nfs-subdir-external-provisioner | [manifests/10-nfs-provisioner.yaml](manifests/10-nfs-provisioner.yaml) | `v4.0.2` (latest tag on `registry.k8s.io`) |
 | Postgres | [manifests/31-postgres-statefulset.yaml](manifests/31-postgres-statefulset.yaml) | `postgres:16-alpine` |
 | nginx | [manifests/23-nginx-shared-deployment.yaml](manifests/23-nginx-shared-deployment.yaml) | `nginx:1.27-alpine` |
 | busybox seeder/writer | [manifests/22-shared-content-seeder.yaml](manifests/22-shared-content-seeder.yaml), [manifests/40-static-pv.yaml](manifests/40-static-pv.yaml) | `busybox:1.36` |
