@@ -29,7 +29,7 @@ registry-installation/
 
 Pinned inline in [playbooks/install-registry.yaml](playbooks/install-registry.yaml):
 
-- nerdctl **2.2.2**
+- nerdctl **1.7.7** (last 1.x release — see "Why not nerdctl 2.x?" below)
 - registry image **registry:3.1.1**
 
 To bump, edit the `nerdctl_version` and `registry_image` vars at the top of the install playbook, and the matching `registry:3.1.1` reference in the teardown playbook so cleanup deletes the right image.
@@ -74,6 +74,8 @@ bash run.sh playbooks/teardown-registry.yaml -e remove_nerdctl=false
 ## Design notes
 
 **Why `--net=host` for the registry?** nerdctl's default bridge network drops a `nerdctl-bridge.conflist` into `/etc/cni/net.d/`, which on a kubeadm + Cilium node sits next to `05-cilium.conflist` and can break pod networking. Host networking sidesteps the CNI machinery entirely — the registry just listens on `:5000` directly on the control plane.
+
+**Why not nerdctl 2.x?** nerdctl 2.x has a regression ([containerd/nerdctl#4461](https://github.com/containerd/nerdctl/issues/4461)) where it eagerly tries to create a default CNI bridge network *even when launching with `--net=host`* and looks for `/opt/cni/bin/bridge`. On a Cilium node only Cilium's CNI binaries live there, so `nerdctl run` hangs/fails on CNI initialisation. Even installing standard CNI plugins doesn't help — nerdctl would then write `nerdctl-bridge.conflist` into `/etc/cni/net.d/`, which is the exact thing `--net=host` was chosen to avoid. nerdctl 1.7.7 (last 1.x release) does not have this behaviour and is documented as compatible with containerd 1.6/1.7; Ubuntu 24.04 ships containerd 1.7.28. If/when nerdctl upstream fixes #4461, this pin can be lifted.
 
 **Why `certs.d/<host>/hosts.toml` instead of rewriting `config.toml`?** This is the modern containerd pattern (>=1.5). It only requires flipping a single string (`config_path`) inside `config.toml`; the per-registry settings live in their own files. The previous version of this playbook regenerated `config.toml` from `containerd config default`, which silently wiped the `SystemdCgroup = true` setting from the cluster install and could cause kubelet/containerd cgroup-driver mismatches.
 

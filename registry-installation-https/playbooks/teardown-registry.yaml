@@ -1,0 +1,129 @@
+---
+# Reverse install-registry.yaml in safe order:
+#   1. All nodes — remove certs.d trust + /etc/hosts block, reset config_path,
+#      restart containerd. (Done first so kubelet stops trying to reach the
+#      registry via TLS while we tear it down.)
+#   2. Control plane — stop & remove the container, image, data, certs, nerdctl.
+#
+# Pass `-e remove_nerdctl=false` to keep the nerdctl binary installed.
+# Pass `-e wipe_data=true` to also delete /srv/registry/data (destructive — wipes
+# all pushed images). Default is to keep data so re-install is fast.
+
+- name: Remove registry trust from all nodes
+  hosts: k8s_cluster
+  become: true
+  vars:
+    cp_host: "{{ groups['control_plane'][0] }}"
+    registry_host: "{{ hostvars[cp_host]['ansible_host'] }}"
+    registry_name: "{{ hostvars[cp_host]['ansible_facts']['hostname'] | default(cp_host) }}"
+    registry_port: 5000
+    certs_d_dir: /etc/containerd/certs.d
+    endpoint_keys:
+      - "{{ registry_host }}:{{ registry_port }}"
+      - "{{ registry_name }}:{{ registry_port }}"
+  handlers:
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: yes
+  tasks:
+    - name: Gather facts on the control plane (for hostname)
+      setup:
+      delegate_to: "{{ cp_host }}"
+      delegate_facts: true
+      run_once: true
+
+    - name: Re-resolve registry_name now that CP facts are loaded
+      set_fact:
+        registry_name: "{{ hostvars[cp_host]['ansible_facts']['hostname'] }}"
+        endpoint_keys:
+          - "{{ registry_host }}:{{ registry_port }}"
+          - "{{ hostvars[cp_host]['ansible_facts']['hostname'] }}:{{ registry_port }}"
+
+    - name: Check containerd config exists
+      stat:
+        path: /etc/containerd/config.toml
+      register: containerd_config
+
+    - name: Reset registry config_path to empty
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^(\s*)config_path\s*=\s*"{{ certs_d_dir | regex_escape }}"'
+        replace: '\1config_path = ""'
+      when: containerd_config.stat.exists
+      notify: restart containerd
+
+    - name: Remove per-endpoint hosts.toml directories
+      file:
+        path: "{{ certs_d_dir }}/{{ item }}"
+        state: absent
+      loop: "{{ endpoint_keys }}"
+      notify: restart containerd
+
+    - name: Remove /etc/hosts registry entry
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - REGISTRY-HTTPS"
+        state: absent
+
+- name: Remove registry container, image, certs, and nerdctl on control plane
+  hosts: control_plane
+  become: true
+  vars:
+    registry_image: "registry:3.1.1"
+    registry_data_dir: /srv/registry/data
+    registry_certs_dir: /srv/registry/certs
+    remove_nerdctl: true
+    wipe_data: false
+  tasks:
+    - name: Detect nerdctl
+      command: which nerdctl
+      register: nerdctl_path
+      failed_when: false
+      changed_when: false
+
+    - name: Stop registry container
+      command: nerdctl stop private-registry
+      register: stop_result
+      failed_when: false
+      changed_when: stop_result.rc == 0
+      when: nerdctl_path.rc == 0
+
+    - name: Remove registry container
+      command: nerdctl rm private-registry
+      register: rm_result
+      failed_when: false
+      changed_when: rm_result.rc == 0
+      when: nerdctl_path.rc == 0
+
+    - name: Remove registry image
+      command: "nerdctl rmi {{ registry_image }}"
+      register: rmi_result
+      failed_when: false
+      changed_when: rmi_result.rc == 0
+      when: nerdctl_path.rc == 0
+
+    - name: Remove certs directory
+      file:
+        path: "{{ registry_certs_dir }}"
+        state: absent
+
+    - name: Remove registry data directory (destructive — gated by wipe_data)
+      file:
+        path: "{{ registry_data_dir }}"
+        state: absent
+      when: wipe_data | bool
+
+    - name: Remove nerdctl binary
+      file:
+        path: /usr/local/bin/nerdctl
+        state: absent
+      when: remove_nerdctl | bool
+
+    - name: Confirm cleanup
+      debug:
+        msg:
+          - "Registry container + image + certs removed."
+          - "Data dir {{ registry_data_dir }} {{ 'wiped' if (wipe_data | bool) else 'KEPT (re-install will reuse pushed images)' }}."
+          - "nerdctl removed: {{ remove_nerdctl | bool }}."

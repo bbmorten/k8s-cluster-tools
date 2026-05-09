@@ -7,7 +7,13 @@
   hosts: control_plane
   become: true
   vars:
-    nerdctl_version: "2.2.2"
+    # nerdctl pinned to the final 1.x release. nerdctl 2.x eagerly creates a
+    # default CNI bridge network even with --net=host (containerd/nerdctl#4461),
+    # which on a Cilium node either hangs waiting on the missing bridge plugin
+    # or drops nerdctl-bridge.conflist next to 05-cilium.conflist and breaks
+    # pod networking. 1.7.7 does not have that behaviour and is documented as
+    # compatible with containerd 1.6/1.7 — Ubuntu 24.04 ships containerd 1.7.x.
+    nerdctl_version: "1.7.7"
     registry_image: "registry:3.1.1"
     registry_data_dir: "/var/lib/registry"
   tasks:

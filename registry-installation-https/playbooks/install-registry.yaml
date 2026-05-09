@@ -1,0 +1,298 @@
+---
+# HTTPS variant of the in-cluster registry lab.
+#
+# Stand up an OCI registry (registry:3) on the control-plane node with TLS
+# enabled (a self-signed cert generated on the node), then distribute the CA
+# to every node and configure containerd to trust the registry via
+# /etc/containerd/certs.d/<host>:<port>/hosts.toml — NO insecure-skip-verify
+# anywhere.
+#
+# Ported from the shell-script lab under
+#   sites/kubess/public/files/Roadmap/02-common-registry/{01,02,03}-*.sh
+# but using nerdctl 1.7.7 + --net=host so it works on Cilium nodes:
+#   - nerdctl 2.x has containerd/nerdctl#4461: it eagerly creates a default
+#     CNI bridge network even with --net=host and looks for
+#     /opt/cni/bin/bridge → hangs on a Cilium node.
+#   - nerdctl 1.x with -p still requires the bridge CNI plugin AND would drop
+#     nerdctl-bridge.conflist into /etc/cni/net.d/, breaking pod networking
+#     next to Cilium's 05-cilium.conflist.
+#   - --net=host on nerdctl 1.7.7 bypasses CNI entirely; the registry just
+#     listens on :5000 of the control-plane host directly. The TLS cert SANs
+#     cover both the IP and the short hostname so verification still works.
+
+# ---------------------------------------------------------------------------
+# Play 1 — Control plane: install nerdctl, generate cert, run registry:3
+# ---------------------------------------------------------------------------
+- name: Install nerdctl, generate TLS cert, and run registry:3 on control plane
+  hosts: control_plane
+  become: true
+  vars:
+    nerdctl_version: "1.7.7"          # See header — do NOT bump to 2.x.
+    registry_image: "registry:3.1.1"
+    registry_port: 5000
+    registry_data_dir: /srv/registry/data
+    registry_certs_dir: /srv/registry/certs
+    registry_host: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
+    registry_name: "{{ ansible_facts['hostname'] }}"
+    cert_days: 825
+  tasks:
+    # --- nerdctl --------------------------------------------------------------
+    - name: Check installed nerdctl version
+      command: nerdctl --version
+      register: nerdctl_check
+      failed_when: false
+      changed_when: false
+
+    - name: Decide whether nerdctl needs install/upgrade
+      set_fact:
+        nerdctl_needs_install: "{{ nerdctl_check.rc != 0 or nerdctl_version not in (nerdctl_check.stdout | default('')) }}"
+
+    - name: Download nerdctl tarball
+      get_url:
+        url: "https://github.com/containerd/nerdctl/releases/download/v{{ nerdctl_version }}/nerdctl-{{ nerdctl_version }}-linux-amd64.tar.gz"
+        dest: "/tmp/nerdctl-{{ nerdctl_version }}.tar.gz"
+        mode: '0644'
+      when: nerdctl_needs_install
+
+    - name: Install nerdctl binary into /usr/local/bin
+      unarchive:
+        src: "/tmp/nerdctl-{{ nerdctl_version }}.tar.gz"
+        dest: /usr/local/bin
+        remote_src: yes
+        include:
+          - nerdctl
+        mode: '0755'
+        owner: root
+        group: root
+      when: nerdctl_needs_install
+
+    - name: Confirm nerdctl is callable
+      command: nerdctl --version
+      register: nerdctl_verify
+      changed_when: false
+
+    - name: Show nerdctl version
+      debug:
+        var: nerdctl_verify.stdout
+
+    # --- TLS cert -------------------------------------------------------------
+    - name: Ensure registry data and certs directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ registry_data_dir }}"
+        - "{{ registry_certs_dir }}"
+
+    - name: Generate self-signed registry certificate (idempotent on disk)
+      ansible.builtin.command:
+        cmd: >-
+          openssl req
+          -newkey rsa:2048 -nodes -keyout {{ registry_certs_dir }}/domain.key
+          -x509 -days {{ cert_days }} -out {{ registry_certs_dir }}/domain.crt
+          -subj /CN={{ registry_name }}
+          -addext subjectAltName=DNS:{{ registry_name }},DNS:localhost,IP:{{ registry_host }},IP:127.0.0.1
+          -addext keyUsage=digitalSignature,keyEncipherment
+          -addext extendedKeyUsage=serverAuth
+        creates: "{{ registry_certs_dir }}/domain.crt"
+
+    - name: Lock down private key
+      file:
+        path: "{{ registry_certs_dir }}/domain.key"
+        mode: '0600'
+        owner: root
+        group: root
+
+    - name: Make certificate world-readable (containerd reads it as root anyway)
+      file:
+        path: "{{ registry_certs_dir }}/domain.crt"
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Show certificate summary
+      command: >-
+        openssl x509 -in {{ registry_certs_dir }}/domain.crt
+        -noout -subject -issuer -dates -ext subjectAltName
+      register: cert_summary
+      changed_when: false
+
+    - name: Display certificate summary
+      debug:
+        var: cert_summary.stdout_lines
+
+    # --- registry container ---------------------------------------------------
+    - name: Pull registry image
+      command: "nerdctl pull {{ registry_image }}"
+      register: registry_pull
+      changed_when: "'downloading' in (registry_pull.stderr | default('') | lower) or 'pulling' in (registry_pull.stderr | default('') | lower)"
+
+    - name: Inspect registry container status (if any)
+      command: nerdctl ps -a --filter name=^private-registry$ --format '{% raw %}{{.Status}}{% endraw %}'
+      register: registry_state
+      changed_when: false
+
+    - name: Run registry container (host network, TLS, restart=always)
+      # --net=host (not -p): see header comment.
+      # registry:3 reads REGISTRY_HTTP_TLS_* to enable TLS on :5000.
+      command: >-
+        nerdctl run -d
+        --name private-registry
+        --restart=always
+        --net=host
+        -v {{ registry_data_dir }}:/var/lib/registry
+        -v {{ registry_certs_dir }}:/certs:ro
+        -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/domain.crt
+        -e REGISTRY_HTTP_TLS_KEY=/certs/domain.key
+        {{ registry_image }}
+      when: registry_state.stdout | trim == ""
+
+    - name: Start registry container if it exists but is stopped
+      command: nerdctl start private-registry
+      when:
+        - registry_state.stdout | trim != ""
+        - not (registry_state.stdout | trim).startswith("Up")
+
+    - name: Wait for registry to answer on https://localhost:5000/v2/
+      ansible.builtin.uri:
+        url: "https://localhost:{{ registry_port }}/v2/"
+        status_code: 200
+        ca_path: "{{ registry_certs_dir }}/domain.crt"
+        validate_certs: true
+      register: reg_local_probe
+      retries: 10
+      delay: 2
+      until: reg_local_probe.status == 200
+
+    # --- expose cert to other plays via slurp ---------------------------------
+    - name: Read CA cert content for distribution to other nodes
+      slurp:
+        src: "{{ registry_certs_dir }}/domain.crt"
+      register: registry_ca_slurp
+
+    - name: Stash CA cert + connection facts on the control plane host
+      set_fact:
+        registry_ca_b64: "{{ registry_ca_slurp.content }}"
+        registry_host_pub: "{{ registry_host }}"
+        registry_name_pub: "{{ registry_name }}"
+        registry_port_pub: "{{ registry_port }}"
+
+# ---------------------------------------------------------------------------
+# Play 2 — Every node: install CA, write hosts.toml (IP + name forms),
+#                      flip config_path, add /etc/hosts entry, restart containerd
+# ---------------------------------------------------------------------------
+- name: Distribute CA and configure containerd trust on every node
+  hosts: k8s_cluster
+  become: true
+  vars:
+    cp_host: "{{ groups['control_plane'][0] }}"
+    registry_host: "{{ hostvars[cp_host]['registry_host_pub'] }}"
+    registry_name: "{{ hostvars[cp_host]['registry_name_pub'] }}"
+    registry_port: "{{ hostvars[cp_host]['registry_port_pub'] }}"
+    registry_ca_b64: "{{ hostvars[cp_host]['registry_ca_b64'] }}"
+    certs_d_dir: /etc/containerd/certs.d
+    # Two endpoint keys: nodes can address the registry by IP or by short
+    # hostname; both must verify against the same CA, both forms appear as
+    # SANs in the cert.
+    endpoint_keys:
+      - "{{ registry_host }}:{{ registry_port }}"
+      - "{{ registry_name }}:{{ registry_port }}"
+  handlers:
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: yes
+  tasks:
+    - name: Verify containerd config exists
+      stat:
+        path: /etc/containerd/config.toml
+      register: containerd_config
+
+    - name: Fail if containerd config is missing
+      fail:
+        msg: "/etc/containerd/config.toml not found. Run k8s-setup-w-cilium/playbooks/install-cluster.yaml first."
+      when: not containerd_config.stat.exists
+
+    - name: Ensure certs.d host directory exists for each endpoint
+      file:
+        path: "{{ certs_d_dir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop: "{{ endpoint_keys }}"
+
+    - name: Drop CA cert under each endpoint
+      copy:
+        dest: "{{ certs_d_dir }}/{{ item }}/ca.crt"
+        content: "{{ registry_ca_b64 | b64decode }}"
+        mode: '0644'
+        owner: root
+        group: root
+      loop: "{{ endpoint_keys }}"
+      notify: restart containerd
+
+    - name: Write hosts.toml for each endpoint (HTTPS, CA-anchored)
+      copy:
+        dest: "{{ certs_d_dir }}/{{ item }}/hosts.toml"
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          server = "https://{{ item }}"
+
+          [host."https://{{ item }}"]
+            capabilities = ["pull", "resolve", "push"]
+            ca = "{{ certs_d_dir }}/{{ item }}/ca.crt"
+      loop: "{{ endpoint_keys }}"
+      notify: restart containerd
+
+    - name: Point containerd registry config_path at certs.d
+      # Surgical replace — do NOT regenerate config.toml from
+      # `containerd config default`, that would wipe the SystemdCgroup=true
+      # set by k8s-setup-w-cilium/playbooks/install-cluster.yaml.
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^(\s*)config_path\s*=\s*"[^"]*"'
+        replace: '\1config_path = "{{ certs_d_dir }}"'
+      notify: restart containerd
+
+    - name: Map registry name → registry IP in /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - REGISTRY-HTTPS"
+        block: |
+          {{ registry_host }} {{ registry_name }}
+
+    - name: Flush handlers so containerd reloads before we probe
+      meta: flush_handlers
+
+    - name: Probe registry via IP form
+      ansible.builtin.uri:
+        url: "https://{{ registry_host }}:{{ registry_port }}/v2/"
+        status_code: 200
+        ca_path: "{{ certs_d_dir }}/{{ registry_host }}:{{ registry_port }}/ca.crt"
+        validate_certs: true
+      register: reg_ip_probe
+      retries: 5
+      delay: 3
+      until: reg_ip_probe.status == 200
+      ignore_errors: true
+
+    - name: Probe registry via name form
+      ansible.builtin.uri:
+        url: "https://{{ registry_name }}:{{ registry_port }}/v2/"
+        status_code: 200
+        ca_path: "{{ certs_d_dir }}/{{ registry_name }}:{{ registry_port }}/ca.crt"
+        validate_certs: true
+      register: reg_name_probe
+      retries: 5
+      delay: 3
+      until: reg_name_probe.status == 200
+      ignore_errors: true
+
+    - name: Report registry reachability
+      debug:
+        msg:
+          - "{{ inventory_hostname }} → {{ registry_host }}:{{ registry_port }} : {{ 'OK' if (reg_ip_probe.status | default(0)) == 200 else 'FAIL' }}"
+          - "{{ inventory_hostname }} → {{ registry_name }}:{{ registry_port }} : {{ 'OK' if (reg_name_probe.status | default(0)) == 200 else 'FAIL' }}"

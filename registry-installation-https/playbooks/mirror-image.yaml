@@ -1,0 +1,86 @@
+---
+# Pull a public image and push it into the in-cluster TLS registry.
+# Port of sites/kubess/public/files/Roadmap/02-common-registry/image-mirror.sh
+#
+# Usage:
+#   bash run.sh playbooks/mirror-image.yaml -e image=nginx:1.27
+#   bash run.sh playbooks/mirror-image.yaml -e image=alpine -e tag=3.20
+#   bash run.sh playbooks/mirror-image.yaml -e image=ghcr.io/foo/bar:v1
+#
+# Trust is already set up on the control plane by install-registry.yaml, so
+# the push goes over verified TLS — no --insecure-tls anywhere.
+
+- name: Mirror a public image into the in-cluster registry
+  hosts: control_plane
+  become: true
+  vars:
+    registry_port: 5000
+    registry_host: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
+    # Required: -e image=<repo[:tag]>
+    # Optional: -e tag=<dst_tag> (defaults to source tag)
+    image: ""
+    tag: ""
+  tasks:
+    - name: Validate image was provided
+      fail:
+        msg: "Pass -e image=<repo[:tag]>. Examples: -e image=nginx:1.27 ; -e image=alpine -e tag=3.20"
+      when: image | length == 0
+
+    - name: Parse source repo and tag from image
+      set_fact:
+        # Split tag from rightmost ':' but only if the part after ':' has no '/'
+        # (so registry/repo:tag and ghcr.io/x/y:tag both work).
+        src_repo: "{{ image.rsplit(':', 1)[0] if (':' in image and '/' not in image.rsplit(':', 1)[1]) else image }}"
+        src_tag_raw: "{{ image.rsplit(':', 1)[1] if (':' in image and '/' not in image.rsplit(':', 1)[1]) else 'latest' }}"
+
+    - name: Resolve destination tag (override or source tag)
+      set_fact:
+        src_tag: "{{ src_tag_raw }}"
+        dst_tag: "{{ tag if tag | length > 0 else src_tag_raw }}"
+
+    - name: Compute destination repo (strip registry/path prefix, keep last segment)
+      set_fact:
+        dst_repo: "{{ src_repo.split('/')[-1] }}"
+
+    - name: Compute destination reference
+      set_fact:
+        dst_ref: "{{ registry_host }}:{{ registry_port }}/{{ dst_repo }}:{{ dst_tag }}"
+
+    - name: Show planned mirror operation
+      debug:
+        msg: "Mirroring {{ src_repo }}:{{ src_tag }} → {{ dst_ref }}"
+
+    - name: Pull source image (try as given)
+      command: "nerdctl pull --quiet {{ src_repo }}:{{ src_tag }}"
+      register: pull_primary
+      failed_when: false
+      changed_when: pull_primary.rc == 0
+
+    - name: Fallback — pull as docker.io/library/<image>
+      command: "nerdctl pull --quiet docker.io/library/{{ src_repo }}:{{ src_tag }}"
+      when: pull_primary.rc != 0
+      register: pull_fallback
+
+    - name: Resolve which source ref actually exists locally
+      set_fact:
+        local_src_ref: "{{ (src_repo + ':' + src_tag) if pull_primary.rc == 0 else ('docker.io/library/' + src_repo + ':' + src_tag) }}"
+
+    - name: Tag image for the in-cluster registry
+      command: "nerdctl tag {{ local_src_ref }} {{ dst_ref }}"
+
+    - name: Push image to the in-cluster registry
+      command: "nerdctl push --quiet {{ dst_ref }}"
+
+    - name: Read catalog (verifies CA-anchored TLS works)
+      ansible.builtin.uri:
+        url: "https://{{ registry_host }}:{{ registry_port }}/v2/_catalog"
+        ca_path: /srv/registry/certs/domain.crt
+        validate_certs: true
+        return_content: yes
+      register: catalog
+
+    - name: Show catalog
+      debug:
+        msg:
+          - "Pushed: {{ dst_ref }}"
+          - "Catalog: {{ catalog.content }}"
