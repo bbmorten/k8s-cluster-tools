@@ -47,9 +47,10 @@
       register: containerd_config
 
     - name: Reset registry config_path to empty
+      # Match both "..." and '...' value quoting (matches install playbook).
       ansible.builtin.replace:
         path: /etc/containerd/config.toml
-        regexp: '^(\s*)config_path\s*=\s*"{{ certs_d_dir | regex_escape }}"'
+        regexp: '^(\s*)config_path\s*=\s*([''"]){{ certs_d_dir | regex_escape }}\2'
         replace: '\1config_path = ""'
       when: containerd_config.stat.exists
       notify: restart containerd

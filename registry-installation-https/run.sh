@@ -21,19 +21,25 @@ playbook_file=""
 debug_mode=false
 syntax_check=false
 check_mode=false
+passthrough_args=()
 
-# Parse all arguments
-for arg in "$@"; do
-    if [[ "$arg" == "--debug=true" ]]; then
-        debug_mode=true
-    elif [[ "$arg" == "--syntax-check" ]]; then
-        syntax_check=true
-    elif [[ "$arg" == "--check" ]]; then
-        check_mode=true
-    elif [[ "$arg" != --* && "$playbook_file" == "" ]]; then
-        # First non-option argument is the playbook file
-        playbook_file="$arg"
-    fi
+# Parse all arguments. Anything not in our shortlist of recognised flags or
+# the playbook file path is forwarded verbatim to ansible-playbook — that's
+# how `bash run.sh playbooks/foo.yaml -e key=val --tags x` reaches ansible.
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug=true) debug_mode=true; shift ;;
+        --syntax-check) syntax_check=true; shift ;;
+        --check) check_mode=true; shift ;;
+        *)
+            if [[ -z "$playbook_file" && "$1" != -* ]]; then
+                playbook_file="$1"
+            else
+                passthrough_args+=("$1")
+            fi
+            shift
+            ;;
+    esac
 done
 
 # Check if playbook file was provided
@@ -101,9 +107,14 @@ if [ "$debug_mode" = true ]; then
     echo "Debug mode enabled"
 fi
 
-# Execute the Ansible command
-echo "Running Ansible command: $ansible_command"
-eval "$ansible_command"
+# Execute the Ansible command. Use exec form (no eval) so passthrough args
+# with spaces / quotes survive intact.
+echo "Running Ansible command: $ansible_command ${passthrough_args[*]:-}"
+ansible_args=(-b -K "$playbook_file")
+[[ "$syntax_check" == true ]] && ansible_args+=(--syntax-check)
+[[ "$check_mode" == true ]] && ansible_args+=(--check)
+[[ "$debug_mode" == true ]] && ansible_args+=(-vvvv)
+ansible-playbook "${ansible_args[@]}" "${passthrough_args[@]}"
 
 # Display a message about the execution mode
 if [ "$syntax_check" = true ]; then

@@ -251,9 +251,11 @@
       # Surgical replace — do NOT regenerate config.toml from
       # `containerd config default`, that would wipe the SystemdCgroup=true
       # set by k8s-setup-w-cilium/playbooks/install-cluster.yaml.
+      # Match both "..." and '...' value quoting — Ubuntu 24.04's containerd
+      # config default emits single quotes.
       ansible.builtin.replace:
         path: /etc/containerd/config.toml
-        regexp: '^(\s*)config_path\s*=\s*"[^"]*"'
+        regexp: '^(\s*)config_path\s*=\s*([''"])[^''"]*\2'
         replace: '\1config_path = "{{ certs_d_dir }}"'
       notify: restart containerd
 

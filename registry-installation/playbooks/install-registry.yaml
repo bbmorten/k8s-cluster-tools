@@ -147,9 +147,11 @@
       notify: restart containerd
 
     - name: Point containerd registry config_path at certs.d
+      # Match both "..." and '...' value quoting — containerd config default
+      # emits single quotes in some versions (Ubuntu 24.04 ships one).
       ansible.builtin.replace:
         path: /etc/containerd/config.toml
-        regexp: '^(\s*)config_path\s*=\s*"[^"]*"'
+        regexp: '^(\s*)config_path\s*=\s*([''"])[^''"]*\2'
         replace: '\1config_path = "{{ certs_d_dir }}"'
       notify: restart containerd
 
