@@ -80,6 +80,7 @@ bash scripts/fetch-kubeconfig.sh --standalone ~/.kube/cilium-lab.conf
 ## Logging
 
 Both `run.sh` and `scripts/fetch-kubeconfig.sh` tee output to `logs/` (gitignored):
+
 - `logs/run-<playbook>-<timestamp>.log` — full terminal output
 - `logs/ansible-<playbook>-<timestamp>.log` — structured Ansible log via `ANSIBLE_LOG_PATH`
 - `logs/fetch-kubeconfig-<timestamp>.log` — includes `set -x` traces
@@ -121,6 +122,24 @@ To bump the MetalLB version, edit the `v0.15.3` URL in **both** scripts (`setup-
 **Interactive `nerdctl` needs `sudo`.** As non-root, nerdctl tries to talk to a per-user rootless containerd at `/run/user/$UID/containerd-rootless` (which doesn't exist here). The system containerd's socket at `/run/containerd/containerd.sock` is root-only. The playbook itself works because every nerdctl task runs under `become: true`.
 
 **Teardown order matters.** [playbooks/teardown-registry.yaml](registry-installation/playbooks/teardown-registry.yaml) reverses install in this order to keep containerd healthy: (1) all nodes — reset `config_path` to `""`, remove the `certs.d/<cp-ip>:5000/` directory, restart containerd; (2) control plane — `nerdctl stop/rm/rmi registry:3.1.1`; (3) delete `/var/lib/registry` (destroys blob store); (4) delete `/usr/local/bin/nerdctl` unless `-e remove_nerdctl=false`. Each step gracefully no-ops on hosts where the install never ran.
+
+**Teardown's `nerdctl rm` is permissive.** The `nerdctl stop/rm/rmi` tasks set `failed_when: false` so the playbook keeps running on a host that never had the registry installed. Trap: if a *previous* run left a container in a state nerdctl can't actually remove (zombie task, restart-loop, post-stop hook failing on a Cilium-conflict subnet), the rm silently fails and teardown reports success while the container is still running and bound to `:5000`. Symptom on the next install: the new registry container goes into `Restarting (1)` with `bind: address already in use` and the `:5000` listener is the *previous* registry. Fix: `ssh vm@<cp> 'sudo nerdctl rm -f registry private-registry'` first. If even `-f` fails, the deeper cleanup is the reboot + state-dir-wipe sequence in the trap note above.
+
+**`run.sh` forwards unknown args to ansible-playbook.** Anything that isn't `--debug=true` / `--syntax-check` / `--check` / the playbook path is passed through verbatim — that's how `bash run.sh playbooks/mirror-image.yaml -e image=nginx:1.27` reaches ansible. Don't simplify the arg loop back to the original form-recognised-flags-only style; that breaks `-e`, `--tags`, `--limit`, etc. Same fix is in [registry-installation-https/run.sh](registry-installation-https/run.sh) — keep them in sync.
+
+## In-cluster registry, TLS variant (registry-installation-https/)
+
+[registry-installation-https/](registry-installation-https/) is the TLS-clean sibling of `registry-installation/`. Same Ansible shape (`run.sh`, `ansible.cfg`, `inventory/`, `playbooks/`) but registry serves on `https://<cp-ip>:5000` with a self-signed cert anchored on every node via `ca = …` in `hosts.toml`. **No `insecure_skip_verify` anywhere.** Three playbooks:
+
+- [playbooks/install-registry.yaml](registry-installation-https/playbooks/install-registry.yaml) — Play 1 installs nerdctl 1.7.7, generates `/srv/registry/certs/domain.{crt,key}` via `openssl req` with SANs `DNS:<short_hostname>, DNS:localhost, IP:<cp_ip>, IP:127.0.0.1` (idempotent via `creates:`), runs `registry:3.1.1` with `--net=host` and `REGISTRY_HTTP_TLS_CERTIFICATE` / `REGISTRY_HTTP_TLS_KEY`, slurps the CA. Play 2 fans the CA + a `https://`-flavoured `hosts.toml` to **two** endpoint keys per node — `<cp-ip>:5000/` and `<cp-name>:5000/` — flips the same `config_path`, adds an `/etc/hosts` line for the name form (Ansible-managed block), restarts containerd, probes both forms over verified TLS.
+- [playbooks/teardown-registry.yaml](registry-installation-https/playbooks/teardown-registry.yaml) — reverses cluster trust first (so kubelet stops hitting TLS during tear-down), then container/image/cert/data on the control plane. `-e wipe_data=true` to drop `/srv/registry/data`. `-e remove_nerdctl=false` to keep the binary. Same silent-rm trap as the HTTP variant.
+- [playbooks/mirror-image.yaml](registry-installation-https/playbooks/mirror-image.yaml) — port of the source `image-mirror.sh`. `bash run.sh playbooks/mirror-image.yaml -e image=nginx:1.27` (or `-e image=alpine -e tag=3.20`, or `-e image=ghcr.io/foo/bar:v1`). Strips registry/path prefix to derive the destination repo (`ghcr.io/foo/bar` → `bar`), pulls (with `docker.io/library/<name>` fallback for short bare names), tags, pushes, then `uri:` reads `/v2/_catalog` over verified TLS to confirm.
+
+**Both variants write to `/etc/containerd/certs.d/<cp-ip>:5000/`** and flip the same `config_path` line. Running both installs back-to-back without an intervening teardown leaves whichever ran last in charge — and trying to install the HTTP variant after the HTTPS lab while `private-registry` is still up gives the new container `bind: address already in use` (see silent-rm trap above). Run the other lab's teardown first.
+
+**Two endpoint keys per node, one CA.** kubelet/crictl match the connection target byte-for-byte against the directory under `certs.d/`. Pods may reference the registry by IP or by hostname; both must have a matching directory and both forms appear as SANs in the cert. The `hosts.toml`s point to the *same* `ca.crt` file, so cert rotation only requires updating one place per endpoint.
+
+**TLS via `--net=host`, not `-p 5000:5000`.** The source shell-script lab at `mydocs-plog-nextra/.../02-common-registry/02-run-registry.sh` publishes the port. On a Cilium node `-p` drags in the bridge CNI plugin (drops `nerdctl-bridge.conflist` → breaks Cilium pod networking) AND can leave orphan iptables NAT rules on uncleaned removal (see registry-installation/ trap note above). `--net=host` sidesteps both. Cert SAN matching is unaffected — the registry's listening address is the host's IP/hostname either way.
 
 ## Ingress-nginx demo (ingress-nginx-w-certificate/)
 
