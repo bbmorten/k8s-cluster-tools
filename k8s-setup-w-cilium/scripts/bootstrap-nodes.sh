@@ -106,11 +106,20 @@ is_local() {
 
 PUBKEY="$(<"$PUBKEY_FILE")"
 
-# Build the SSH key list for the bootstrap leg. Try BOOTSTRAP_KEY first if set,
+# Build the SSH key list for the bootstrap leg. Try BOOTSTRAP_KEY first if set
+# AND the file exists (silently skipping a non-existent BOOTSTRAP_KEY avoids
+# ssh's "Identity file ... not accessible" warning when the user exported
+# something like ~/.ssh/id_ed25519 that doesn't exist on this workstation),
 # then fall back to the project key — that way re-runs work after the project
 # key is already authorized.
 SSH_BOOT_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
-[[ -n "$BOOTSTRAP_KEY" ]] && SSH_BOOT_OPTS+=(-i "$BOOTSTRAP_KEY")
+if [[ -n "$BOOTSTRAP_KEY" ]]; then
+  if [[ -f "$BOOTSTRAP_KEY" ]]; then
+    SSH_BOOT_OPTS+=(-i "$BOOTSTRAP_KEY")
+  else
+    echo ">> BOOTSTRAP_KEY=$BOOTSTRAP_KEY not found — ignoring, falling back to ssh-agent / $PRIVKEY_FILE"
+  fi
+fi
 SSH_BOOT_OPTS+=(-i "$PRIVKEY_FILE")
 
 SSH_VERIFY_OPTS=(-i "$PRIVKEY_FILE" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
@@ -122,7 +131,7 @@ SSH_VERIFY_OPTS=(-i "$PRIVKEY_FILE" -o StrictHostKeyChecking=accept-new -o Conne
 remote_bootstrap() {
   local ip="$1"
   local sudo_flag="-nE"
-  [[ -n "$SUDO_PASS" ]] && sudo_flag="-SE"
+  local feed_password=0
 
   if is_local "$ip"; then
     echo ">> [$ip] running locally (matches a local interface)"
@@ -130,10 +139,27 @@ remote_bootstrap() {
     echo ">> [$ip] connecting as ${SSH_USER}@${ip}"
   fi
 
+  # Decide whether to feed SUDO_PASS over stdin. We only need to feed it if
+  # passwordless sudo isn't already in effect on this node — if it IS, sudo
+  # never consumes the stdin password and bash -s reads it as a command,
+  # producing "Password1!: command not found".
+  if [[ -n "$SUDO_PASS" ]]; then
+    local nopw_ok=0
+    if is_local "$ip"; then
+      sudo -n true 2>/dev/null && nopw_ok=1
+    else
+      ssh "${SSH_BOOT_OPTS[@]}" "${SSH_USER}@${ip}" 'sudo -n true' 2>/dev/null && nopw_ok=1
+    fi
+    if (( nopw_ok == 0 )); then
+      sudo_flag="-SE"
+      feed_password=1
+    fi
+  fi
+
   # Build stdin = optional password line + remote script body. With sudo -S the
   # first stdin line is consumed as the password; bash -s then reads the rest.
   {
-    [[ -n "$SUDO_PASS" ]] && printf '%s\n' "$SUDO_PASS"
+    (( feed_password == 1 )) && printf '%s\n' "$SUDO_PASS"
     cat <<'REMOTE'
 set -euo pipefail
 
