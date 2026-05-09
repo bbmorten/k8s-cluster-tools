@@ -49,7 +49,7 @@
     - name: Save current file as pre-revert snapshot
       ansible.builtin.copy:
         src: "{{ target_file }}"
-        dest: "{{ target_file }}.pre-revert-{{ ansible_date_time.iso8601_basic_short | default(lookup('pipe', 'date +%Y%m%dT%H%M%S')) }}"
+        dest: "{{ target_file }}.pre-revert-{{ ansible_facts['date_time']['iso8601_basic_short'] | default(lookup('pipe', 'date +%Y%m%dT%H%M%S')) }}"
         remote_src: true
       when: not ansible_check_mode
 

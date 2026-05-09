@@ -47,8 +47,8 @@
   pre_tasks:
     - name: Verify this is Ubuntu
       ansible.builtin.assert:
-        that: ansible_distribution == "Ubuntu"
-        fail_msg: "This playbook only supports Ubuntu, got {{ ansible_distribution }}"
+        that: ansible_facts['distribution'] == "Ubuntu"
+        fail_msg: "This playbook only supports Ubuntu, got {{ ansible_facts['distribution'] }}"
 
     - name: Detect which sources format is in use
       ansible.builtin.stat:
@@ -60,7 +60,7 @@
     - name: "[deb822] Back up ubuntu.sources"
       ansible.builtin.copy:
         src: /etc/apt/sources.list.d/ubuntu.sources
-        dest: "/etc/apt/sources.list.d/ubuntu.sources.bak-{{ ansible_date_time.iso8601_basic_short }}"
+        dest: "/etc/apt/sources.list.d/ubuntu.sources.bak-{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
         remote_src: true
         force: false
       when: deb822_sources.stat.exists
@@ -87,7 +87,7 @@
     - name: "[legacy] Back up sources.list"
       ansible.builtin.copy:
         src: /etc/apt/sources.list
-        dest: "/etc/apt/sources.list.bak-{{ ansible_date_time.iso8601_basic_short }}"
+        dest: "/etc/apt/sources.list.bak-{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
         remote_src: true
         force: false
       when: not deb822_sources.stat.exists
@@ -118,7 +118,7 @@
     - name: Show new mirrors in use
       ansible.builtin.debug:
         msg: >-
-          {{ inventory_hostname }} ({{ ansible_distribution_version }}):
+          {{ inventory_hostname }} ({{ ansible_facts['distribution_version'] }}):
           archive → {{ tr_mirror }},
           security → {{ tr_security_mirror }}
 

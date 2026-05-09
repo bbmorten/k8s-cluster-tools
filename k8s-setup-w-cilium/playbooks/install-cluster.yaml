@@ -35,7 +35,7 @@
         path: /etc/hosts
         create: yes
         block: |
-          127.0.1.1 {{ ansible_hostname }} {{ ansible_hostname }}
+          127.0.1.1 {{ ansible_facts['hostname'] }} {{ ansible_facts['hostname'] }}
           127.0.0.1 localhost
           
           # The following lines are desirable for IPv6 capable hosts
@@ -163,7 +163,7 @@
       debug:
         msg: "Swap status: {{ 'Disabled' if verify_swap.stdout == '' else 'Still enabled!' }}"
 
-- name: Install Kubernetes 1.32 on Ubuntu 24.04
+- name: Install Kubernetes 1.35 on Ubuntu 24.04
   hosts: k8s_cluster
   gather_facts: true
   any_errors_fatal: true
@@ -233,7 +233,7 @@
 
     - name: Ensure universe repository is enabled
       apt_repository:
-        repo: "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
+        repo: "deb http://archive.ubuntu.com/ubuntu {{ ansible_facts['distribution_release'] }} universe"
         state: present
         update_cache: yes
       when: universe_in_ubuntu_sources.stdout == ""
@@ -277,15 +277,15 @@
     
     - name: Add Kubernetes signing key
       shell: |
-        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key | gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.35/deb/Release.key | gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
       args:
         executable: /bin/bash
         creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-    
-    - name: Add Kubernetes 1.32 repository
+
+    - name: Add Kubernetes 1.35 repository
       copy:
         dest: /etc/apt/sources.list.d/kubernetes.list
-        content: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /'
+        content: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.35/deb/ /'
         mode: '0644'
     
     - name: Update apt cache after adding Kubernetes repository
@@ -339,7 +339,7 @@
   any_errors_fatal: true
   
   vars:
-    crictl_version: "v1.32.0"  # Default version as fallback
+    crictl_version: "v1.35.0"  # Default version as fallback
   
   tasks:
     - name: Get latest crictl version using shell
@@ -432,20 +432,6 @@
         state: absent
       changed_when: false
 
-- name: Create Kubernetes configuration templates
-  hosts: control_plane
-  gather_facts: true
-  vars:
-    pod_network_cidr: "10.244.0.0/16"  # Pod CIDR used by Cilium
-    service_cidr: "10.96.0.0/12"       # Kubernetes default
-    kubernetes_version: "1.32.2"       # Can be adjusted as needed
-    control_plane_endpoint: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
-    apiserver_cert_extra_sans: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
-  tasks:
-    - name: Skip this play
-      debug:
-        msg: "Skipping template creation - using direct configuration instead"
-
 - name: Initialize Kubernetes cluster on control plane node
   hosts: control_plane
   gather_facts: true
@@ -454,11 +440,11 @@
   vars:
     pod_network_cidr: "10.244.0.0/16"  # Pod CIDR used by Cilium
     service_cidr: "10.96.0.0/12"       # Kubernetes default
-    kubernetes_version: "1.32.2"       # Can be adjusted as needed
+    kubernetes_version: "1.35.4"       # Can be adjusted as needed
     control_plane_endpoint: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
     apiserver_cert_extra_sans: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
-    cilium_version: "1.16.5"           # Cilium chart/release to install
-    cilium_cli_version: "v0.16.24"     # cilium CLI release
+    cilium_version: "1.19.3"           # Cilium chart/release to install
+    cilium_cli_version: "v0.19.2"      # cilium CLI release
 
 
   tasks:
@@ -531,17 +517,17 @@
         content: |
           ---
           # kubeadm-config
-          apiVersion: kubeadm.k8s.io/v1beta3
+          apiVersion: kubeadm.k8s.io/v1beta4
           kind: InitConfiguration
           nodeRegistration:
-            name: {{ ansible_hostname }}
+            name: {{ ansible_facts['hostname'] }}
             criSocket: unix:///run/containerd/containerd.sock
             taints: []
           localAPIEndpoint:
             advertiseAddress: {{ hostvars[groups['control_plane'][0]]['ansible_host'] }}
             bindPort: 6443
           ---
-          apiVersion: kubeadm.k8s.io/v1beta3
+          apiVersion: kubeadm.k8s.io/v1beta4
           kind: ClusterConfiguration
           kubernetesVersion: v{{ kubernetes_version }}
           networking:
@@ -551,15 +537,17 @@
           apiServer:
             certSANs:
             - "{{ apiserver_cert_extra_sans }}"
-            - "{{ ansible_hostname }}"
-            - "{{ ansible_default_ipv4.address | default(ansible_host) }}"
+            - "{{ ansible_facts['hostname'] }}"
+            - "{{ ansible_facts['default_ipv4']['address'] | default(ansible_host) }}"
             - "127.0.0.1"
           controllerManager:
             extraArgs:
-              bind-address: 0.0.0.0
+            - name: bind-address
+              value: 0.0.0.0
           scheduler:
             extraArgs:
-              bind-address: 0.0.0.0
+            - name: bind-address
+              value: 0.0.0.0
           ---
           apiVersion: kubelet.config.k8s.io/v1beta1
           kind: KubeletConfiguration
@@ -600,7 +588,7 @@
     # Install Cilium CNI via the cilium CLI
     - name: Detect host architecture for cilium CLI
       set_fact:
-        cilium_cli_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+        cilium_cli_arch: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}"
 
     - name: Download cilium CLI tarball
       get_url:
@@ -648,7 +636,7 @@
       
     # Verify cluster is operational
     - name: Wait for control-plane node to be ready
-      command: kubectl wait --for=condition=Ready node/{{ ansible_hostname }} --timeout=300s
+      command: kubectl wait --for=condition=Ready node/{{ ansible_facts['hostname'] }} --timeout=300s
       become: false
       environment:
         KUBECONFIG: /home/{{ ansible_user }}/.kube/config
@@ -756,7 +744,7 @@
       
     - name: Display node join status
       debug:
-        msg: "Node {{ ansible_hostname }} has successfully joined the Kubernetes cluster."
+        msg: "Node {{ ansible_facts['hostname'] }} has successfully joined the Kubernetes cluster."
       when: k8s_joined.stat.exists or join_result.changed
 
 - name: Verify cluster status from control plane

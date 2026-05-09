@@ -46,7 +46,7 @@
         - /var/lib/cni
         - /etc/cni
         - /opt/cni
-        - "{{ ansible_env.HOME }}/.kube"
+        - "{{ ansible_facts['env']['HOME'] }}/.kube"
         - "/home/{{ ansible_user }}/.kube"
 
     - name: Delete network interfaces
@@ -62,20 +62,10 @@
       changed_when: false
       ignore_errors: true
 
-    - name: Flush iptables rules
-      shell: |
-        iptables -F
-        iptables -t nat -F
-        iptables -t mangle -F
-        iptables -X
-      changed_when: true
-      ignore_errors: true
-
-    - name: Restart networking
-      service:
-        name: systemd-networkd
-        state: restarted
-      ignore_errors: true
+    # NOTE: We intentionally do NOT flush all iptables rules or restart
+    # systemd-networkd here. `kubeadm reset` already restores the iptables
+    # baseline; a bare `iptables -F; -X` wipes host-management rules (fail2ban,
+    # custom firewall) and bouncing networkd is a pure SSH-disruption risk.
 
     - name: Remove CNI configuration files
       file:
@@ -163,15 +153,13 @@
         state: absent
       ignore_errors: true
 
-    - name: Remove cilium state directories
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /var/run/cilium
-        - /sys/fs/bpf/tc
-      ignore_errors: true
-      when: "'control_plane' in group_names"
+    # NOTE: We do NOT rmtree /var/run/cilium or /sys/fs/bpf/tc here.
+    # /var/run/cilium contains cgroup pseudo-files (io.prio.class) that can't
+    # be unlinked, and /sys/fs/bpf/tc holds pinned BPF maps still referenced
+    # by tc-attached eBPF programs on the host NIC (because cilium installs
+    # with kubeProxyReplacement=true). Deleting those pins out from under a
+    # live BPF program drops all packets on the primary NIC -> SSH blackhole.
+    # `kubeadm reset` plus a node reboot before the next install handles it.
 
     - name: Verify Kubernetes components are removed
       shell: dpkg -l | grep -E 'kube|containerd'
