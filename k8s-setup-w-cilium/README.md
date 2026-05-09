@@ -4,7 +4,7 @@ Self-contained setup for a 4-node Kubernetes cluster (1 control plane + 3 worker
 
 All cluster create/delete/maintenance operations are driven from `inventory/nodes.ini`. Everything needed lives inside this folder — no paths reach outside it.
 
-This folder assumes the 4 nodes already exist and are reachable over SSH. It's the Cilium counterpart of [../k8s-setup-w-calico/](../k8s-setup-w-calico/) — same layout, same inventory contract; `playbooks/install-cluster.yaml` installs the `cilium` CLI on the control plane and runs `cilium install` instead of applying a Calico manifest.
+This folder assumes the 4 nodes already exist and are reachable over SSH. `playbooks/install-cluster.yaml` installs the `cilium` CLI on the control plane and runs `cilium install` to bring up the CNI.
 
 ## Layout
 
@@ -74,11 +74,12 @@ Env overrides: `SSH_USER`, `BOOTSTRAP_KEY`, `PUBKEY_FILE`, `PRIVKEY_FILE`, `INVE
 ## Versions
 
 - Ubuntu 24.04 LTS on each node
-- Kubernetes **1.32.2** (repo `pkgs.k8s.io/core:/stable:/v1.32`)
-- Cilium **1.16.5** (installed via cilium CLI **v0.16.24**)
-- containerd via Docker APT repo
+- Kubernetes **1.35.4** (repo `pkgs.k8s.io/core:/stable:/v1.35`)
+- Cilium **1.19.3** (installed via cilium CLI **v0.19.2**)
+- containerd from Ubuntu's `universe` apt repository (the install play enables `universe` if it's missing)
+- crictl latest release from `kubernetes-sigs/cri-tools` (with `v1.35.0` as a fallback)
 
-To bump versions, edit [playbooks/install-cluster.yaml](playbooks/install-cluster.yaml): `kubernetes_version`, `cilium_version`, `cilium_cli_version`, and the two `v1.32` strings in the APT repo setup.
+To bump versions, edit [playbooks/install-cluster.yaml](playbooks/install-cluster.yaml): `kubernetes_version`, `cilium_version`, `cilium_cli_version`, and the two `v1.35` strings in the APT repo setup.
 
 ## Bring up a fresh cluster
 
@@ -179,12 +180,12 @@ Each log starts/ends with a banner showing timestamps, args, and exit code. When
 
 [inventory/nodes.ini](inventory/nodes.ini) defines groups `control_plane`, `workers`, and `k8s_cluster`. Every playbook here targets `k8s_cluster` (or subgroups). Ansible user is `vm`; SSH key is `inventory/node-ssh-key`.
 
-## Next phase
-
-For the Calico equivalent, see [../k8s-setup-w-calico/](../k8s-setup-w-calico/). For the separate Cilium-on-Multipass guide with Hubble, see [../README-CILIUM-LABS-UBUNTU-VMs.md](../README-CILIUM-LABS-UBUNTU-VMs.md).
-
 ## Cilium-specific tips
 
 - `cilium status` on the control plane shows agent/operator health at a glance. `cilium connectivity test` runs the official E2E networking tests (ephemeral namespace, a few minutes to complete).
-- Hubble (flow observability) is off by default here. Enable post-install with `cilium hubble enable --ui` and then `cilium hubble port-forward &` → open `http://localhost:12000`.
+- Hubble (flow observability) is off by default here. See [../cilium-HUBBLE/01-README-HUBBLE.md](../cilium-HUBBLE/01-README-HUBBLE.md) for the post-install enable flow, and [../cilium-HUBBLE/02-README-TRAFFIC-GEN.md](../cilium-HUBBLE/02-README-TRAFFIC-GEN.md) for cross-namespace curl snippets useful for exercising NetworkPolicies.
 - The install uses `kubeProxyReplacement=true`, so kube-proxy is disabled by Cilium. If you re-enable kube-proxy later, also flip this flag off.
+
+## Add-ons
+
+Post-install labs live in sibling directories at the repo root: [../metallb-installation/](../metallb-installation/) (LoadBalancer IP allocation), [../registry-installation/](../registry-installation/) (in-cluster Docker registry), [../ingress-nginx-w-certificate/](../ingress-nginx-w-certificate/), [../storage-nfs/](../storage-nfs/), [../keycloak-kubelogin-rbac/](../keycloak-kubelogin-rbac/), [../service-types-examples/](../service-types-examples/), [../pod-probes-examples/](../pod-probes-examples/), and [../controller-crds-operators/](../controller-crds-operators/). Each has its own README.
